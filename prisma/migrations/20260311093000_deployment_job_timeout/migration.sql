@@ -1,0 +1,2 @@
+ALTER TABLE `deployment_jobs`
+  ADD COLUMN `timeout_ms` INTEGER NOT NULL DEFAULT 1800000;

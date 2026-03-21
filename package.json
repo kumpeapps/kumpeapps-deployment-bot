@@ -1,0 +1,37 @@
+{
+  "name": "kumpeapps-deployment-bot",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js",
+    "smoke:test": "bash scripts/smoke-test.sh",
+    "release:notes": "bash scripts/generate-release-notes.sh",
+    "test": "node --import tsx/esm --test-reporter spec --test src/schemas/deployment-config.test.ts src/services/deploy-rules.test.ts src/services/secret-crypto-core.test.ts src/services/secret-health.test.ts src/services/ssh-health.test.ts src/services/webhook-security-health.test.ts src/services/virtualizor-health.test.ts src/services/admin-api-security-health.test.ts src/services/admin-auth.test.ts src/services/admin-auth.routes.test.ts src/services/rate-limit-health.test.ts src/services/deployment-compensation-health.test.ts src/services/github-status.test.ts src/services/rate-limit.test.ts",
+    "test:docker": "docker compose --profile test run --rm bot-test",
+    "prisma:generate": "prisma generate",
+    "prisma:migrate": "prisma migrate dev",
+    "prisma:deploy": "prisma migrate deploy"
+  },
+  "dependencies": {
+    "@octokit/auth-app": "^7.1.3",
+    "@octokit/webhooks": "^13.9.0",
+    "@prisma/client": "^6.5.0",
+    "dotenv": "^16.4.7",
+    "fastify": "^5.2.1",
+    "pino-pretty": "^13.0.0",
+    "tweetnacl": "^1.0.3",
+    "tweetnacl-sealedbox-js": "^1.2.0",
+    "tweetnacl-util": "^0.15.1",
+    "yaml": "^2.8.1",
+    "zod": "^3.24.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.9",
+    "prisma": "^6.5.0",
+    "tsx": "^4.19.3",
+    "typescript": "^5.8.2"
+  }
+}

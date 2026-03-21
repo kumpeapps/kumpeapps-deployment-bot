@@ -1,0 +1,1246 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>KumpeApps Deployment Bot - Admin Dashboard</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+      background: #0f172a;
+      color: #e2e8f0;
+      line-height: 1.6;
+    }
+
+    .container {
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 20px;
+    }
+
+    header {
+      background: #1e293b;
+      padding: 20px;
+      border-radius: 8px;
+      margin-bottom: 30px;
+      border-left: 4px solid #3b82f6;
+    }
+
+    header h1 {
+      font-size: 24px;
+      margin-bottom: 5px;
+    }
+
+    header p {
+      font-size: 14px;
+      color: #94a3b8;
+    }
+
+    .tabs {
+      display: flex;
+      gap: 10px;
+      margin-bottom: 20px;
+      border-bottom: 1px solid #334155;
+      padding-bottom: 10px;
+    }
+
+    .tab-button {
+      padding: 10px 20px;
+      background: none;
+      border: none;
+      color: #94a3b8;
+      cursor: pointer;
+      border-bottom: 2px solid transparent;
+      transition: all 0.3s;
+    }
+
+    .tab-button.active {
+      color: #3b82f6;
+      border-bottom-color: #3b82f6;
+    }
+
+    .tab-button:hover {
+      color: #cbd5e1;
+    }
+
+    .tab-content {
+      display: none;
+      animation: fadeIn 0.3s;
+    }
+
+    .tab-content.active {
+      display: block;
+    }
+
+    @keyframes fadeIn {
+      from { opacity: 0; }
+      to { opacity: 1; }
+    }
+
+    .card {
+      background: #1e293b;
+      border: 1px solid #334155;
+      border-radius: 8px;
+      padding: 20px;
+      margin-bottom: 20px;
+    }
+
+    .card h2 {
+      font-size: 18px;
+      margin-bottom: 15px;
+      color: #f1f5f9;
+    }
+
+    .form-group {
+      margin-bottom: 15px;
+    }
+
+    label {
+      display: block;
+      margin-bottom: 5px;
+      font-size: 14px;
+      color: #cbd5e1;
+    }
+
+    input, select, textarea {
+      width: 100%;
+      padding: 10px;
+      background: #0f172a;
+      border: 1px solid #334155;
+      color: #e2e8f0;
+      border-radius: 4px;
+      font-family: inherit;
+      transition: border-color 0.3s;
+    }
+
+    input:focus, select:focus, textarea:focus {
+      outline: none;
+      border-color: #3b82f6;
+    }
+
+    .button {
+      padding: 10px 20px;
+      background: #3b82f6;
+      color: white;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+      transition: background 0.3s;
+      font-size: 14px;
+    }
+
+    .button:hover {
+      background: #2563eb;
+    }
+
+    .button.secondary {
+      background: #475569;
+    }
+
+    .button.secondary:hover {
+      background: #64748b;
+    }
+
+    .button.danger {
+      background: #ef4444;
+    }
+
+    .button.danger:hover {
+      background: #dc2626;
+    }
+
+    .button:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+
+    .alert {
+      padding: 12px;
+      border-radius: 4px;
+      margin-bottom: 15px;
+      border-left: 4px solid;
+    }
+
+    .alert.success {
+      background: #064e3b;
+      border-color: #10b981;
+      color: #d1fae5;
+    }
+
+    .alert.error {
+      background: #7f1d1d;
+      border-color: #ef4444;
+      color: #fee2e2;
+    }
+
+    .alert.info {
+      background: #0c4a6e;
+      border-color: #0ea5e9;
+      color: #cffafe;
+    }
+
+    .table-responsive {
+      overflow-x: auto;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 14px;
+    }
+
+    th {
+      text-align: left;
+      padding: 12px;
+      background: #0f172a;
+      border-bottom: 2px solid #334155;
+      color: #cbd5e1;
+      font-weight: 600;
+    }
+
+    td {
+      padding: 12px;
+      border-bottom: 1px solid #334155;
+    }
+
+    tr:hover {
+      background: #1e293b;
+    }
+
+    .status-badge {
+      display: inline-block;
+      padding: 4px 12px;
+      border-radius: 12px;
+      font-size: 12px;
+      font-weight: 600;
+    }
+
+    .status-badge.success {
+      background: #064e3b;
+      color: #d1fae5;
+    }
+
+    .status-badge.warning {
+      background: #78350f;
+      color: #fef3c7;
+    }
+
+    .status-badge.error {
+      background: #7f1d1d;
+      color: #fee2e2;
+    }
+
+    .loading {
+      text-align: center;
+      padding: 40px;
+      color: #94a3b8;
+    }
+
+    .spinner {
+      display: inline-block;
+      width: 20px;
+      height: 20px;
+      border: 3px solid #334155;
+      border-top-color: #3b82f6;
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
+
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+
+    .grid-2 {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 20px;
+    }
+
+    @media (max-width: 768px) {
+      .grid-2 {
+        grid-template-columns: 1fr;
+      }
+
+      .tabs {
+        flex-wrap: wrap;
+      }
+
+      .tab-button {
+        padding: 8px 15px;
+        font-size: 14px;
+      }
+    }
+
+    .stat-card {
+      background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
+      border: 1px solid #334155;
+      border-radius: 8px;
+      padding: 20px;
+      text-align: center;
+    }
+
+    .stat-card .number {
+      font-size: 32px;
+      color: #3b82f6;
+      font-weight: bold;
+      margin: 10px 0;
+    }
+
+    .stat-card .label {
+      font-size: 14px;
+      color: #94a3b8;
+    }
+
+    .modal {
+      display: none;
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      background: rgba(0, 0, 0, 0.7);
+      z-index: 1000;
+      justify-content: center;
+      align-items: center;
+    }
+
+    .modal.active {
+      display: flex;
+    }
+
+    .modal-content {
+      background: #1e293b;
+      border: 1px solid #334155;
+      border-radius: 8px;
+      padding: 30px;
+      width: 90%;
+      max-width: 500px;
+      max-height: 90vh;
+      overflow-y: auto;
+    }
+
+    .modal-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 20px;
+      padding-bottom: 15px;
+      border-bottom: 1px solid #334155;
+    }
+
+    .modal-header h2 {
+      font-size: 20px;
+    }
+
+    .modal-close {
+      background: none;
+      border: none;
+      color: #94a3b8;
+      font-size: 24px;
+      cursor: pointer;
+      transition: color 0.3s;
+    }
+
+    .modal-close:hover {
+      color: #f1f5f9;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>🚀 Deployment Bot Admin</h1>
+      <p id="header-status">Status: <span id="status-indicator">Checking...</span></p>
+    </header>
+
+    <div class="tabs">
+      <button class="tab-button active" onclick="switchTab('dashboard')">Dashboard</button>
+      <button class="tab-button" onclick="switchTab('rbac')">RBAC</button>
+      <button class="tab-button" onclick="switchTab('users')">Users</button>
+      <button class="tab-button" onclick="switchTab('plans')">Plans</button>
+      <button class="tab-button" onclick="switchTab('queue')">Queue</button>
+      <button class="tab-button" onclick="switchTab('secrets')">Secrets</button>
+    </div>
+
+    <!-- Dashboard Tab -->
+    <div id="dashboard" class="tab-content active">
+      <div class="grid-2">
+        <div class="stat-card" id="queue-stat">
+          <div class="label">Queued Jobs</div>
+          <div class="number">-</div>
+        </div>
+        <div class="stat-card" id="success-stat">
+          <div class="label">Success Rate (1h)</div>
+          <div class="number">-</div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Recent Deployments</h2>
+        <div id="recent-deployments" class="loading">
+          <div class="spinner"></div> Loading deployments...
+        </div>
+      </div>
+    </div>
+
+    <!-- RBAC Tab -->
+    <div id="rbac" class="tab-content">
+      <div class="card">
+        <h2>Create Role Binding</h2>
+        <form id="rbac-form" onsubmit="createRoleBinding(event)">
+          <div class="form-group">
+            <label>Admin Token</label>
+            <input type="password" id="rbac-token" placeholder="Minimum 16 characters" required>
+          </div>
+          <div class="form-group">
+            <label>Role</label>
+            <select id="rbac-role" required>
+              <option value="">Select role...</option>
+              <option value="owner">Owner</option>
+              <option value="operator">Operator</option>
+              <option value="auditor">Auditor</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label>Description (Optional)</label>
+            <input type="text" id="rbac-description" placeholder="e.g., Production operator">
+          </div>
+          <button type="submit" class="button">Create Binding</button>
+          <div id="rbac-message"></div>
+        </form>
+      </div>
+
+      <div class="card">
+        <h2>Active Role Bindings</h2>
+        <div id="rbac-list" class="loading">
+          <div class="spinner"></div> Loading bindings...
+        </div>
+      </div>
+    </div>
+
+    <!-- Users Tab -->
+    <div id="users" class="tab-content">
+      <div class="card">
+        <h2>Approve User</h2>
+        <form id="users-form" onsubmit="approveUser(event)">
+          <div class="form-group">
+            <label>GitHub Username</label>
+            <input type="text" id="user-github" placeholder="john-doe" required>
+          </div>
+          <div class="form-group">
+            <label>Max Domains</label>
+            <input type="number" id="user-max-domains" value="5" min="0" required>
+          </div>
+          <div class="form-group">
+            <label>Max VMs</label>
+            <input type="number" id="user-max-vms" value="2" min="0" required>
+          </div>
+          <div class="form-group">
+            <label>Approved Domains (comma-separated)</label>
+            <textarea id="user-domains" placeholder="example.com, *.example.com"></textarea>
+          </div>
+          <button type="submit" class="button">Approve User</button>
+          <div id="users-message"></div>
+        </form>
+      </div>
+
+      <div class="card">
+        <h2>Users</h2>
+        <div id="users-list" class="loading">
+          <div class="spinner"></div> Loading users...
+        </div>
+      </div>
+    </div>
+
+    <!-- Plans Tab -->
+    <div id="plans" class="tab-content">
+      <div class="card">
+        <h2>Create/Update Plan</h2>
+        <form id="plans-form" onsubmit="upsertPlan(event)">
+          <div class="form-group">
+            <label>Plan Name</label>
+            <input type="text" id="plan-name" placeholder="e.g., basic, premium" required>
+          </div>
+          <div class="form-group">
+            <label>Dev Plan ID</label>
+            <input type="number" id="plan-dev-id" placeholder="Virtualizor dev plan ID" required>
+          </div>
+          <div class="form-group">
+            <label>Stage Plan ID</label>
+            <input type="number" id="plan-stage-id" placeholder="Virtualizor stage plan ID" required>
+          </div>
+          <div class="form-group">
+            <label>Prod Plan ID</label>
+            <input type="number" id="plan-prod-id" placeholder="Virtualizor prod plan ID" required>
+          </div>
+          <button type="submit" class="button">Create/Update Plan</button>
+          <div id="plans-message"></div>
+        </form>
+      </div>
+
+      <div class="card">
+        <h2>Available Plans</h2>
+        <div id="plans-list" class="loading">
+          <div class="spinner"></div> Loading plans...
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Authorize User Plan</h2>
+        <form id="authorize-plan-form" onsubmit="authorizePlan(event)">
+          <div class="form-group">
+            <label>GitHub Username</label>
+            <input type="text" id="authorize-plan-username" placeholder="john-doe" required>
+          </div>
+          <div class="form-group">
+            <label>Plan Name</label>
+            <input type="text" id="authorize-plan-name" placeholder="e.g., premium" required>
+          </div>
+          <button type="submit" class="button">Authorize Plan</button>
+          <div id="authorize-plan-message"></div>
+        </form>
+      </div>
+    </div>
+
+    <!-- Queue Tab -->
+    <div id="queue" class="tab-content">
+      <div class="card">
+        <h2>Queue Stats</h2>
+        <div id="queue-stats" class="loading">
+          <div class="spinner"></div> Loading queue stats...
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Active Jobs</h2>
+        <div id="active-jobs" class="loading">
+          <div class="spinner"></div> Loading jobs...
+        </div>
+      </div>
+    </div>
+
+    <!-- Secrets Tab -->
+    <div id="secrets" class="tab-content">
+      <div class="card">
+        <h2>Repository Secrets</h2>
+        <form id="secrets-search-form" style="margin-bottom: 20px;">
+          <div class="grid-2">
+            <div class="form-group">
+              <label>Repository Owner</label>
+              <input type="text" id="secrets-search-owner" placeholder="org-name">
+            </div>
+            <div class="form-group">
+              <label>Repository Name</label>
+              <input type="text" id="secrets-search-repo" placeholder="repo-name">
+            </div>
+          </div>
+          <button type="button" class="button" onclick="loadSecrets()">Search Secrets</button>
+        </form>
+        <div id="secrets-list" class="loading">
+          <p>Use the search form above to find repository secrets</p>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Add Repository Secret</h2>
+        <form id="secrets-form" onsubmit="addSecret(event)">
+          <div class="form-group">
+            <label>Repository Owner</label>
+            <input type="text" id="secret-owner" placeholder="org-name" required>
+          </div>
+          <div class="form-group">
+            <label>Repository Name</label>
+            <input type="text" id="secret-repo" placeholder="repo-name" required>
+          </div>
+          <div class="form-group">
+            <label>Secret Name</label>
+            <input type="text" id="secret-name" placeholder="DATABASE_URL" required>
+          </div>
+          <div class="form-group">
+            <label>Secret Value</label>
+            <textarea id="secret-value" placeholder="secret value" required></textarea>
+          </div>
+          <button type="submit" class="button">Add Secret</button>
+          <div id="secrets-message"></div>
+        </form>
+      </div>
+    </div>
+  </div>
+
+  <!-- Edit User Modal -->
+  <div id="edit-user-modal" class="modal">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h2>Edit User</h2>
+        <button class="modal-close" onclick="closeEditUserModal()">&times;</button>
+      </div>
+      <form id="edit-user-form" onsubmit="saveUserEdit(event)">
+        <input type="hidden" id="edit-user-username">
+        <div class="form-group">
+          <label>GitHub Username</label>
+          <input type="text" id="edit-user-display" disabled>
+        </div>
+        <div class="form-group">
+          <label>Status</label>
+          <select id="edit-user-status" required>
+            <option value="pending">Pending</option>
+            <option value="approved">Approved</option>
+            <option value="suspended">Suspended</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label>Max Domains</label>
+          <input type="number" id="edit-user-max-domains" min="0" required>
+        </div>
+        <div class="form-group">
+          <label>Max VMs</label>
+          <input type="number" id="edit-user-max-vms" min="0" required>
+        </div>
+        <div class="form-group">
+          <label>Approved Domains (comma-separated)</label>
+          <textarea id="edit-user-domains" placeholder="example.com, *.example.com"></textarea>
+        </div>
+        <div style="display: flex; gap: 10px;">
+          <button type="submit" class="button">Save Changes</button>
+          <button type="button" class="button secondary" onclick="closeEditUserModal()">Cancel</button>
+        </div>
+        <div id="edit-user-message"></div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Edit Secret Modal -->
+  <div id="edit-secret-modal" class="modal">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h2>Update Secret Value</h2>
+        <button class="modal-close" onclick="closeEditSecretModal()">&times;</button>
+      </div>
+      <form id="edit-secret-form" onsubmit="saveSecretEdit(event)">
+        <input type="hidden" id="edit-secret-owner">
+        <input type="hidden" id="edit-secret-repo">
+        <input type="hidden" id="edit-secret-name">
+        <div class="form-group">
+          <label>Repository</label>
+          <input type="text" id="edit-secret-display-repo" disabled>
+        </div>
+        <div class="form-group">
+          <label>Secret Name</label>
+          <input type="text" id="edit-secret-display-name" disabled>
+        </div>
+        <div class="form-group">
+          <label>New Secret Value</label>
+          <textarea id="edit-secret-value" placeholder="Enter new secret value" required></textarea>
+          <small style="color: #94a3b8;">Note: You cannot view the current value for security reasons</small>
+        </div>
+        <div style="display: flex; gap: 10px;">
+          <button type="submit" class="button">Update Secret</button>
+          <button type="button" class="button secondary" onclick="closeEditSecretModal()">Cancel</button>
+        </div>
+        <div id="edit-secret-message"></div>
+      </form>
+    </div>
+  </div>
+
+  <script>
+    async function apiCall(path, options = {}) {
+      const headers = {
+        "Content-Type": "application/json",
+        ...options.headers
+      };
+
+      try {
+        const response = await fetch(path, {
+          ...options,
+          headers,
+          credentials: "same-origin"
+        });
+
+        if (!response.ok) {
+          if (response.status === 401 || response.status === 403) {
+            window.location.href = "/admin/login";
+            return null;
+          }
+          throw new Error(`HTTP ${response.status}`);
+        }
+
+        return await response.json();
+      } catch (error) {
+        console.error("API call failed:", error);
+        throw error;
+      }
+    }
+
+    async function ensureSession() {
+      try {
+        const session = await fetch("/admin/session", { credentials: "same-origin" });
+        if (!session.ok) {
+          window.location.href = "/admin/login";
+          return false;
+        }
+        return true;
+      } catch {
+        window.location.href = "/admin/login";
+        return false;
+      }
+    }
+
+    function switchTab(tabName) {
+      document.querySelectorAll(".tab-content").forEach(el => el.classList.remove("active"));
+      document.querySelectorAll(".tab-button").forEach(el => el.classList.remove("active"));
+      document.getElementById(tabName).classList.add("active");
+      event.target.classList.add("active");
+      loadTabData(tabName);
+    }
+
+    async function loadTabData(tabName) {
+      if (tabName === "dashboard") {
+        loadQueueStats();
+        loadRecentDeployments();
+      } else if (tabName === "rbac") {
+        loadRoleBindings();
+      } else if (tabName === "users") {
+        loadUsers();
+      } else if (tabName === "plans") {
+        loadPlans();
+      } else if (tabName === "queue") {
+        loadQueueStats();
+        loadActiveJobs();
+      }
+    }
+
+    async function checkHealth() {
+      try {
+        const health = await fetch("/health").then(r => r.json());
+        let status;
+        if (health.state === "healthy") {
+          status = "✓ Healthy";
+        } else if (health.state === "degraded") {
+          const alertInfo = health.alerts?.sources?.length > 0 ? ` (${health.alerts.sources.join(", ")})` : "";
+          status = `⚠ Degraded${alertInfo}`;
+        } else {
+          status = "⚠ Unknown";
+        }
+        document.getElementById("status-indicator").textContent = status;
+      } catch {
+        document.getElementById("status-indicator").textContent = "✗ Offline";
+      }
+    }
+
+    async function loadQueueStats() {
+      try {
+        const stats = await apiCall("/api/admin/queue-stats");
+        if (stats) {
+          const current = stats.current || {};
+          const recent = stats.recentActivity || {};
+          document.getElementById("queue-stat").innerHTML = `
+            <div class="label">Queued Jobs</div>
+            <div class="number">${current.queued ?? 0}</div>
+          `;
+          if (recent.successRate !== undefined) {
+            document.getElementById("success-stat").innerHTML = `
+              <div class="label">Success Rate (1h)</div>
+              <div class="number">${Math.round(recent.successRate)}%</div>
+            `;
+          }
+          loadQueueStatsDetail(stats);
+        }
+      } catch (error) {
+        console.error("Failed to load queue stats:", error);
+      }
+    }
+
+    function loadQueueStatsDetail(stats) {
+      const current = stats.current || {};
+      const recent = stats.recentActivity || {};
+      const html = `
+        <div class="table-responsive">
+          <table>
+            <tr>
+              <td>Queued:</td>
+              <td>${current.queued || 0}</td>
+            </tr>
+            <tr>
+              <td>Running:</td>
+              <td>${current.running || 0}</td>
+            </tr>
+            <tr>
+              <td>Succeeded (last hour):</td>
+              <td>${recent.succeeded || 0}</td>
+            </tr>
+            <tr>
+              <td>Failed (last hour):</td>
+              <td>${recent.failed || 0}</td>
+            </tr>
+            <tr>
+              <td>Avg Duration:</td>
+              <td>${recent.avgDurationMs ? Math.round(recent.avgDurationMs / 1000) + "s" : "N/A"}</td>
+            </tr>
+          </table>
+        </div>
+      `;
+      const el = document.getElementById("queue-stats");
+      if (el) el.innerHTML = html;
+    }
+
+    async function loadRecentDeployments() {
+      try {
+        const data = await apiCall("/api/admin/deployments/recent?limit=10");
+        if (data && data.deployments) {
+          const html = data.deployments.length > 0 ? `
+            <div class="table-responsive">
+              <table>
+                <thead>
+                  <tr>
+                    <th>ID</th>
+                    <th>Repository</th>
+                    <th>Environment</th>
+                    <th>Status</th>
+                    <th>Created</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  ${data.deployments.map(d => `
+                    <tr>
+                      <td>#${d.id}</td>
+                      <td>${d.repository?.owner || "-"}/${d.repository?.name || "-"}</td>
+                      <td>${d.environment}</td>
+                      <td><span class="status-badge ${d.status}">${d.status}</span></td>
+                      <td>${new Date(d.startedAt || d.createdAt).toLocaleString()}</td>
+                    </tr>
+                  `).join("")}
+                </tbody>
+              </table>
+            </div>
+          ` : "<p>No recent deployments.</p>";
+          document.getElementById("recent-deployments").innerHTML = html;
+        }
+      } catch (error) {
+        document.getElementById("recent-deployments").innerHTML = `<div class="alert error">Failed to load deployments</div>`;
+      }
+    }
+
+    async function loadRoleBindings() {
+      try {
+        const data = await apiCall("/api/admin/rbac/role-bindings");
+        if (data && data.bindings) {
+          const html = data.bindings.length > 0 ? `
+            <div class="table-responsive">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Role</th>
+                    <th>Source</th>
+                    <th>Description</th>
+                    <th>Active</th>
+                    <th>Created</th>
+                    <th>Action</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  ${data.bindings.map(b => `
+                    <tr>
+                      <td><span class="status-badge success">${b.role}</span></td>
+                      <td>${b.source}</td>
+                      <td>${b.description || "-"}</td>
+                      <td>${b.active ? "✓" : "✗"}</td>
+                      <td>${new Date(b.createdAt).toLocaleString()}</td>
+                      <td><button class="button danger" onclick="deactivateBinding('${b.tokenHash}')">Deactivate</button></td>
+                    </tr>
+                  `).join("")}
+                </tbody>
+              </table>
+            </div>
+          ` : "<p>No role bindings.</p>";
+          document.getElementById("rbac-list").innerHTML = html;
+        }
+      } catch (error) {
+        document.getElementById("rbac-list").innerHTML = `<div class="alert error">Failed to load bindings</div>`;
+      }
+    }
+
+    async function createRoleBinding(event) {
+      event.preventDefault();
+      const token = document.getElementById("rbac-token").value;
+      const role = document.getElementById("rbac-role").value;
+      const description = document.getElementById("rbac-description").value;
+
+      try {
+        await apiCall("/api/admin/rbac/role-bindings/upsert", {
+          method: "POST",
+          body: JSON.stringify({ token, role, description })
+        });
+        document.getElementById("rbac-message").innerHTML = '<div class="alert success">✓ Role binding created</div>';
+        document.getElementById("rbac-form").reset();
+        setTimeout(() => loadRoleBindings(), 1000);
+      } catch (error) {
+        document.getElementById("rbac-message").innerHTML = '<div class="alert error">✗ Failed to create binding</div>';
+      }
+    }
+
+    async function deactivateBinding(tokenHash) {
+      if (!confirm("Deactivate this token?")) return;
+      try {
+        await apiCall("/api/admin/rbac/role-bindings/deactivate", {
+          method: "POST",
+          body: JSON.stringify({ tokenHash })
+        });
+        loadRoleBindings();
+      } catch (error) {
+        alert("Failed to deactivate binding");
+      }
+    }
+
+    async function approveUser(event) {
+      event.preventDefault();
+      const githubUsername = document.getElementById("user-github").value;
+      const maxDomains = parseInt(document.getElementById("user-max-domains").value);
+      const maxVms = parseInt(document.getElementById("user-max-vms").value);
+      const domains = document.getElementById("user-domains").value.split(",").map(d => d.trim()).filter(d => d);
+
+      try {
+        await apiCall(`/api/admin/users/${githubUsername}/approve`, {
+          method: "POST",
+          body: JSON.stringify({ maxDomains, maxVms, approvedDomains: domains })
+        });
+        document.getElementById("users-message").innerHTML = '<div class="alert success">✓ User approved</div>';
+        document.getElementById("users-form").reset();
+        loadUsers();
+      } catch (error) {
+        document.getElementById("users-message").innerHTML = '<div class="alert error">✗ Failed to approve user</div>';
+      }
+    }
+
+    async function loadUsers() {
+      try {
+        const data = await apiCall("/api/admin/users?limit=100");
+        if (!data || !data.users) {
+          return;
+        }
+
+        const html = data.users.length > 0 ? `
+          <div class="table-responsive">
+            <table>
+              <thead>
+                <tr>
+                  <th>GitHub</th>
+                  <th>Status</th>
+                  <th>Limits</th>
+                  <th>Domains</th>
+                  <th>Created</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${data.users.map(u => `
+                  <tr>
+                    <td>${u.githubUsername}</td>
+                    <td><span class="status-badge ${u.status === "approved" ? "success" : (u.status === "pending" ? "warning" : "error")}">${u.status}</span></td>
+                    <td>${u.limits ? `${u.limits.maxDomains} domains / ${u.limits.maxVms} VMs` : "-"}</td>
+                    <td>${u.approvedDomains?.length ? u.approvedDomains.join(", ") : "-"}</td>
+                    <td>${new Date(u.createdAt).toLocaleString()}</td>
+                    <td><button class="button secondary" style="padding: 6px 12px; font-size: 12px;" onclick='openEditUserModal(${JSON.stringify(u)})'>Edit</button></td>
+                  </tr>
+                `).join("")}
+              </tbody>
+            </table>
+          </div>
+        ` : "<p>No users found.</p>";
+
+        document.getElementById("users-list").innerHTML = html;
+      } catch (error) {
+        document.getElementById("users-list").innerHTML = `<div class="alert error">Failed to load users</div>`;
+      }
+    }
+
+    async function addSecret(event) {
+      event.preventDefault();
+      const owner = document.getElementById("secret-owner").value;
+      const repo = document.getElementById("secret-repo").value;
+      const name = document.getElementById("secret-name").value;
+      const value = document.getElementById("secret-value").value;
+
+      try {
+        await apiCall("/api/admin/repository-secrets/upsert", {
+          method: "POST",
+          body: JSON.stringify({ repositoryOwner: owner, repositoryName: repo, name, value })
+        });
+        document.getElementById("secrets-message").innerHTML = '<div class="alert success">✓ Secret added</div>';
+        document.getElementById("secrets-form").reset();
+        // Reload secrets if we're viewing this repo
+        const searchOwner = document.getElementById("secrets-search-owner").value;
+        const searchRepo = document.getElementById("secrets-search-repo").value;
+        if (searchOwner === owner && searchRepo === repo) {
+          loadSecrets();
+        }
+      } catch (error) {
+        document.getElementById("secrets-message").innerHTML = '<div class="alert error">✗ Failed to add secret</div>';
+      }
+    }
+
+    async function loadSecrets() {
+      const owner = document.getElementById("secrets-search-owner").value;
+      const repo = document.getElementById("secrets-search-repo").value;
+
+      if (!owner || !repo) {
+        document.getElementById("secrets-list").innerHTML = '<p>Please enter both repository owner and name</p>';
+        return;
+      }
+
+      try {
+        document.getElementById("secrets-list").innerHTML = '<div class="loading"><div class="spinner"></div> Loading secrets...</div>';
+        const data = await apiCall(`/api/admin/repository-secrets?repositoryOwner=${encodeURIComponent(owner)}&repositoryName=${encodeURIComponent(repo)}`);
+        
+        if (data && data.secrets) {
+          const html = data.secrets.length > 0 ? `
+            <div class="table-responsive">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Secret Name</th>
+                    <th>Created</th>
+                    <th>Updated</th>
+                    <th>Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  ${data.secrets.map(s => `
+                    <tr>
+                      <td>${s.name}</td>
+                      <td>${new Date(s.createdAt).toLocaleString()}</td>
+                      <td>${new Date(s.updatedAt).toLocaleString()}</td>
+                      <td><button class="button secondary" style="padding: 6px 12px; font-size: 12px;" onclick='openEditSecretModal(${JSON.stringify(s)})'>Update Value</button></td>
+                    </tr>
+                  `).join("")}
+                </tbody>
+              </table>
+            </div>
+          ` : `<p>No secrets found for ${owner}/${repo}</p>`;
+          document.getElementById("secrets-list").innerHTML = html;
+        }
+      } catch (error) {
+        document.getElementById("secrets-list").innerHTML = '<div class="alert error">Failed to load secrets</div>';
+      }
+    }
+
+    function openEditUserModal(user) {
+      document.getElementById("edit-user-username").value = user.githubUsername;
+      document.getElementById("edit-user-display").value = user.githubUsername;
+      document.getElementById("edit-user-status").value = user.status;
+      document.getElementById("edit-user-max-domains").value = user.limits?.maxDomains || 0;
+      document.getElementById("edit-user-max-vms").value = user.limits?.maxVms || 0;
+      document.getElementById("edit-user-domains").value = user.approvedDomains?.join(", ") || "";
+      document.getElementById("edit-user-message").innerHTML = "";
+      document.getElementById("edit-user-modal").classList.add("active");
+    }
+
+    function closeEditUserModal() {
+      document.getElementById("edit-user-modal").classList.remove("active");
+    }
+
+    async function saveUserEdit(event) {
+      event.preventDefault();
+      const username = document.getElementById("edit-user-username").value;
+      const status = document.getElementById("edit-user-status").value;
+      const maxDomains = parseInt(document.getElementById("edit-user-max-domains").value);
+      const maxVms = parseInt(document.getElementById("edit-user-max-vms").value);
+      const domains = document.getElementById("edit-user-domains").value.split(",").map(d => d.trim()).filter(d => d);
+
+      try {
+        await apiCall(`/api/admin/users/${username}`, {
+          method: "PUT",
+          body: JSON.stringify({ status, maxDomains, maxVms, approvedDomains: domains })
+        });
+        document.getElementById("edit-user-message").innerHTML = '<div class="alert success">✓ User updated</div>';
+        setTimeout(() => {
+          closeEditUserModal();
+          loadUsers();
+        }, 1000);
+      } catch (error) {
+        document.getElementById("edit-user-message").innerHTML = '<div class="alert error">✗ Failed to update user</div>';
+      }
+    }
+
+    // Plans Management
+    async function loadPlans() {
+      try {
+        const data = await apiCall("/api/admin/plans");
+        if (data && data.plans) {
+          const html = data.plans.length > 0 ? `
+            <div class="table-responsive">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Plan Name</th>
+                    <th>Dev Plan ID</th>
+                    <th>Stage Plan ID</th>
+                    <th>Prod Plan ID</th>
+                    <th>Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  ${data.plans.map(p => `
+                    <tr>
+                      <td>${p.name}</td>
+                      <td>${p.devPlanId}</td>
+                      <td>${p.stagePlanId}</td>
+                      <td>${p.prodPlanId}</td>
+                      <td><button class="button danger" style="padding: 6px 12px; font-size: 12px;" onclick='deletePlan("${p.name}")'>Delete</button></td>
+                    </tr>
+                  `).join("")}
+                </tbody>
+              </table>
+            </div>
+          ` : `<p>No plans configured</p>`;
+          document.getElementById("plans-list").innerHTML = html;
+        }
+      } catch (error) {
+        document.getElementById("plans-list").innerHTML = '<div class="alert error">Failed to load plans</div>';
+      }
+    }
+
+    async function upsertPlan(event) {
+      event.preventDefault();
+      const name = document.getElementById("plan-name").value;
+      const devPlanId = parseInt(document.getElementById("plan-dev-id").value);
+      const stagePlanId = parseInt(document.getElementById("plan-stage-id").value);
+      const prodPlanId = parseInt(document.getElementById("plan-prod-id").value);
+
+      try {
+        await apiCall("/api/admin/plans/upsert", {
+          method: "POST",
+          body: JSON.stringify({ name, devPlanId, stagePlanId, prodPlanId })
+        });
+        document.getElementById("plans-message").innerHTML = '<div class="alert success">✓ Plan created/updated</div>';
+        event.target.reset();
+        setTimeout(() => {
+          document.getElementById("plans-message").innerHTML = "";
+          loadPlans();
+        }, 1500);
+      } catch (error) {
+        document.getElementById("plans-message").innerHTML = '<div class="alert error">✗ Failed to save plan</div>';
+      }
+    }
+
+    async function deletePlan(planName) {
+      if (!confirm(`Delete plan "${planName}"?`)) return;
+      
+      try {
+        await apiCall(`/api/admin/plans/${planName}`, { method: "DELETE" });
+        loadPlans();
+      } catch (error) {
+        alert("Failed to delete plan");
+      }
+    }
+
+    async function authorizePlan(event) {
+      event.preventDefault();
+      const githubUsername = document.getElementById("authorize-plan-username").value;
+      const planName = document.getElementById("authorize-plan-name").value;
+
+      try {
+        await apiCall("/api/admin/users/plans/authorize", {
+          method: "POST",
+          body: JSON.stringify({ githubUsername, planName })
+        });
+        document.getElementById("authorize-plan-message").innerHTML = '<div class="alert success">✓ Plan authorized for user</div>';
+        event.target.reset();
+        setTimeout(() => {
+          document.getElementById("authorize-plan-message").innerHTML = "";
+        }, 1500);
+      } catch (error) {
+        document.getElementById("authorize-plan-message").innerHTML = '<div class="alert error">✗ Failed to authorize plan</div>';
+      }
+    }
+
+    function openEditSecretModal(secret) {
+      document.getElementById("edit-secret-owner").value = secret.repositoryOwner;
+      document.getElementById("edit-secret-repo").value = secret.repositoryName;
+      document.getElementById("edit-secret-name").value = secret.name;
+      document.getElementById("edit-secret-display-repo").value = `${secret.repositoryOwner}/${secret.repositoryName}`;
+      document.getElementById("edit-secret-display-name").value = secret.name;
+      document.getElementById("edit-secret-value").value = "";
+      document.getElementById("edit-secret-message").innerHTML = "";
+      document.getElementById("edit-secret-modal").classList.add("active");
+    }
+
+    function closeEditSecretModal() {
+      document.getElementById("edit-secret-modal").classList.remove("active");
+    }
+
+    async function saveSecretEdit(event) {
+      event.preventDefault();
+      const owner = document.getElementById("edit-secret-owner").value;
+      const repo = document.getElementById("edit-secret-repo").value;
+      const name = document.getElementById("edit-secret-name").value;
+      const value = document.getElementById("edit-secret-value").value;
+
+      try {
+        await apiCall("/api/admin/repository-secrets/upsert", {
+          method: "POST",
+          body: JSON.stringify({ repositoryOwner: owner, repositoryName: repo, name, value })
+        });
+        document.getElementById("edit-secret-message").innerHTML = '<div class="alert success">✓ Secret updated</div>';
+        setTimeout(() => {
+          closeEditSecretModal();
+          loadSecrets();
+        }, 1000);
+      } catch (error) {
+        document.getElementById("edit-secret-message").innerHTML = '<div class="alert error">✗ Failed to update secret</div>';
+      }
+    }
+
+    async function loadActiveJobs() {
+      try {
+        const data = await apiCall("/api/deployment-jobs?status=queued&limit=10");
+        if (data && data.jobs) {
+          const html = data.jobs.length > 0 ? `
+            <div class="table-responsive">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Job ID</th>
+                    <th>Status</th>
+                    <th>Created</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  ${data.jobs.map(j => `
+                    <tr>
+                      <td>#${j.id}</td>
+                      <td><span class="status-badge ${j.status}">${j.status}</span></td>
+                      <td>${new Date(j.createdAt).toLocaleString()}</td>
+                    </tr>
+                  `).join("")}
+                </tbody>
+              </table>
+            </div>
+          ` : "<p>No active jobs.</p>";
+          document.getElementById("active-jobs").innerHTML = html;
+        }
+      } catch (error) {
+        document.getElementById("active-jobs").innerHTML = `<div class="alert error">Failed to load jobs</div>`;
+      }
+    }
+
+    (async () => {
+      const authenticated = await ensureSession();
+      if (!authenticated) {
+        return;
+      }
+
+      checkHealth();
+      loadQueueStats();
+      loadRecentDeployments();
+      loadUsers();
+      setInterval(checkHealth, 30000);
+    })();
+  </script>
+</body>
+</html>

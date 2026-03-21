@@ -1,0 +1,38 @@
+# Gitleaks ignore file - suppress false positives in documentation and examples
+# These files contain example configurations, not actual secrets
+
+# Source code (secrets should be in env vars, not code)
+src/**/*.ts
+src/**/*.js
+src/**/*.test.ts
+
+# Database schema and migrations
+prisma/**
+
+# Build output
+dist/**
+node_modules/**
+
+# Documentation files with example secret names and patterns
+README.md
+README-ACTION.md
+ROADMAP.md
+
+# User guides and documentation
+docs/user-guide.md
+docs/operator-runbook.md
+docs/secret-sync-guide.md
+docs/virtualizor-hook-setup.md
+docs/virtualizor-hook-debugging.md
+
+# Example workflow files (contain placeholders only)
+docs/examples/*.yml
+.github/workflows/sync-secrets.yml
+
+# Environment template (contains no actual secrets, only placeholders)
+.env.example
+
+# Test files
+**/*.test.ts
+**/*.test.js
+
