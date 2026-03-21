@@ -261,6 +261,7 @@ export async function registerWebhookRoutes(
 
     await upsertInstallationRepositories({
       installationId: BigInt(payload.installation.id),
+      accountLogin: installationAccountLogin(payload.installation.account),
       repositoriesAdded,
       repositoriesRemoved: []
     });
@@ -289,6 +290,7 @@ export async function registerWebhookRoutes(
   webhooks.on("installation_repositories.removed", async ({ payload }: { payload: any }) => {
     await upsertInstallationRepositories({
       installationId: BigInt(payload.installation.id),
+      accountLogin: installationAccountLogin(payload.installation.account),
       repositoriesAdded: [],
       repositoriesRemoved: payload.repositories_removed.map((repo: any) => {
         const names = splitFullName(repo.full_name);
