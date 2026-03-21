@@ -63,10 +63,22 @@ export async function markInstallationInactive(installationId: bigint): Promise<
 
 export async function upsertInstallationRepositories(input: {
   installationId: bigint;
+  accountLogin?: string;
   repositoriesAdded: RepoInput[];
   repositoriesRemoved: RepoInput[];
 }): Promise<void> {
   await prisma.$transaction(async (tx) => {
+    // Ensure the installation record exists first to satisfy foreign key constraint
+    await tx.githubInstallation.upsert({
+      where: { installationId: input.installationId },
+      update: input.accountLogin ? { accountLogin: input.accountLogin } : {},
+      create: {
+        installationId: input.installationId,
+        accountLogin: input.accountLogin ?? "unknown"
+        // permissionsSnapshot omitted - will default to null
+      }
+    });
+
     for (const repository of input.repositoriesAdded) {
       await tx.repository.upsert({
         where: {
