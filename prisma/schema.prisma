@@ -1,0 +1,321 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserStatus {
+  pending
+  approved
+  suspended
+}
+
+model User {
+  id             Int              @id @default(autoincrement())
+  githubUsername String           @unique @db.VarChar(255)
+  status         UserStatus       @default(pending)
+  createdAt      DateTime         @default(now())
+  limits         UserLimit?
+  approvedDomains ApprovedDomain[]
+  authorizedPlans AuthorizedPlan[]
+  vms            Vm[]
+  vmApprovalRequests VmApprovalRequest[]
+  repositoryUsers RepositoryUser[]
+
+  @@map("users")
+}
+
+model UserLimit {
+  userId     Int  @id
+  maxDomains Int  @default(0)
+  maxVms     Int  @default(0)
+  user       User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("user_limits")
+}
+
+model ApprovedDomain {
+  id         Int      @id @default(autoincrement())
+  userId     Int
+  domain     String   @db.VarChar(255)
+  isWildcard Boolean  @default(false)
+  createdAt  DateTime @default(now())
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, domain])
+  @@map("approved_domains")
+}
+
+model AuthorizedPlan {
+  id         Int      @id @default(autoincrement())
+  userId     Int
+  planName   String   @db.VarChar(255)
+  createdAt  DateTime @default(now())
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, planName])
+  @@map("user_authorized_plans")
+}
+
+model Plan {
+  id           Int      @id @default(autoincrement())
+  name         String   @unique @db.VarChar(255)
+  devPlanId    String?  @db.VarChar(255) @map("dev_plan_id")
+  stagePlanId  String?  @db.VarChar(255) @map("stage_plan_id")
+  prodPlanId   String?  @db.VarChar(255) @map("prod_plan_id")
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  @@map("plans")
+}
+
+model GithubInstallation {
+  installationId     BigInt    @id
+  accountLogin       String    @db.VarChar(255)
+  permissionsSnapshot Json?
+  installedAt        DateTime  @default(now())
+  repositories       Repository[]
+
+  @@map("github_installations")
+}
+
+model Repository {
+  id             Int                 @id @default(autoincrement())
+  installationId BigInt
+  owner          String              @db.VarChar(255)
+  name           String              @db.VarChar(255)
+  defaultBranch  String              @db.VarChar(255)
+  active         Boolean             @default(true)
+  apiToken       String?             @unique @db.VarChar(255)
+  createdAt      DateTime            @default(now())
+  installation   GithubInstallation  @relation(fields: [installationId], references: [installationId], onDelete: Cascade)
+  users          RepositoryUser[]
+  vms            Vm[]
+  vmApprovalRequests VmApprovalRequest[]
+  configSnapshots DeploymentConfig[]
+  deployments    Deployment[]
+  secrets        RepositorySecret[]
+
+  @@unique([owner, name])
+  @@map("repositories")
+}
+
+model RepositorySecret {
+  id           Int      @id @default(autoincrement())
+  repositoryId Int
+  name         String   @db.VarChar(255)
+  value        String   @db.Text
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  repository   Repository @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
+
+  @@unique([repositoryId, name])
+  @@map("repository_secrets")
+}
+
+model RepositoryUser {
+  repositoryId Int
+  userId       Int
+  role         String   @db.VarChar(50)
+  createdAt    DateTime @default(now())
+  repository   Repository @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
+  user         User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([repositoryId, userId])
+  @@map("repository_users")
+}
+
+model Vm {
+  id             Int      @id @default(autoincrement())
+  userId         Int
+  repositoryId   Int
+  environment    String   @db.VarChar(50)
+  vmHostname     String   @db.VarChar(255)
+  virtualizorVmId String? @db.VarChar(255)
+  state          String   @default("pending") @db.VarChar(50)
+  metadata       Json?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  user           User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  repository     Repository @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
+
+  @@unique([repositoryId, environment])
+  @@map("vms")
+}
+
+model VmApprovalRequest {
+  id             Int      @id @default(autoincrement())
+  repositoryId   Int
+  userId         Int
+  vmHostname     String   @db.VarChar(255)
+  environment    String   @db.VarChar(50)
+  githubIssueNumber Int
+  status         String   @default("pending") @db.VarChar(50)
+  requestedBy    String   @db.VarChar(255)
+  approvedBy     String?  @db.VarChar(255)
+  approvedAt     DateTime?
+  metadata       Json?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  repository     Repository @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
+  user           User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([repositoryId, environment])
+  @@map("vm_approval_requests")
+}
+
+model DeploymentConfig {
+  id                Int      @id @default(autoincrement())
+  repositoryId      Int
+  environment       String   @db.VarChar(50)
+  configPath        String   @db.VarChar(500)
+  configHash        String   @db.VarChar(64)
+  parsedJson        Json
+  lastSeenCommitSha String   @db.VarChar(80)
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+  repository        Repository @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
+
+  @@unique([repositoryId, environment, configPath])
+  @@map("deployment_configs")
+}
+
+model Deployment {
+  id                 Int      @id @default(autoincrement())
+  repositoryId       Int
+  environment        String   @db.VarChar(50)
+  deploymentKey      String   @unique @db.VarChar(191)
+  triggeredBy        String?  @db.VarChar(255)
+  commitSha          String   @db.VarChar(80)
+  status             String   @db.VarChar(50)
+  githubDeploymentId BigInt?  @map("github_deployment_id")
+  startedAt          DateTime @default(now())
+  finishedAt         DateTime?
+  repository         Repository @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
+  steps              DeploymentStep[]
+  secretsResolutionAudit SecretsResolutionAudit[]
+  caddyReleases      CaddyRelease[]
+
+  @@map("deployments")
+}
+
+model DeploymentStep {
+  id          Int      @id @default(autoincrement())
+  deploymentId Int
+  stepName    String   @db.VarChar(120)
+  status      String   @db.VarChar(50)
+  logExcerpt  String?  @db.Text
+  startedAt   DateTime @default(now())
+  finishedAt  DateTime?
+  deployment  Deployment @relation(fields: [deploymentId], references: [id], onDelete: Cascade)
+
+  @@map("deployment_steps")
+}
+
+model AuditEvent {
+  id           Int      @id @default(autoincrement())
+  actorType    String   @db.VarChar(50)
+  actorId      String   @db.VarChar(255)
+  action       String   @db.VarChar(120)
+  resourceType String   @db.VarChar(120)
+  resourceId   String   @db.VarChar(255)
+  payloadJson  Json?
+  createdAt    DateTime @default(now())
+
+  @@map("audit_events")
+}
+
+model SecretsResolutionAudit {
+  id           Int      @id @default(autoincrement())
+  deploymentId Int
+  envKey       String   @db.VarChar(255)
+  secretName   String   @db.VarChar(255)
+  resolved     Boolean
+  createdAt    DateTime @default(now())
+  deployment   Deployment @relation(fields: [deploymentId], references: [id], onDelete: Cascade)
+
+  @@map("secrets_resolution_audit")
+}
+
+model CaddyRelease {
+  id             Int      @id @default(autoincrement())
+  deploymentId   Int
+  caddyHost      String   @db.VarChar(255)
+  configChecksum String   @db.VarChar(64)
+  reloadStatus   String   @db.VarChar(50)
+  createdAt      DateTime @default(now())
+  deployment     Deployment @relation(fields: [deploymentId], references: [id], onDelete: Cascade)
+
+  @@map("caddy_releases")
+}
+
+model DeploymentJob {
+  id                    Int      @id @default(autoincrement())
+  label                 String   @db.VarChar(500)
+  payloadJson           Json     @map("payload_json")
+  status                String   @db.VarChar(50)
+  attempts              Int      @default(0)
+  maxAttempts           Int      @default(3) @map("max_attempts")
+  timeoutMs             Int      @default(1800000) @map("timeout_ms")
+  errorMessage          String?  @db.Text @map("error_message")
+  deploymentId          Int?     @map("deployment_id")
+  leaseReclaimCount     Int      @default(0) @map("lease_reclaim_count")
+  requeueCount          Int      @default(0) @map("requeue_count")
+  timeoutFailuresCount  Int      @default(0) @map("timeout_failures_count")
+  startedAt             DateTime? @map("started_at")
+  finishedAt            DateTime? @map("finished_at")
+  createdAt             DateTime @default(now()) @map("created_at")
+  updatedAt             DateTime @updatedAt @map("updated_at")
+
+  @@index([status, createdAt], map: "deployment_jobs_status_created_at_idx")
+  @@index([status, finishedAt], map: "deployment_jobs_status_finished_at_idx")
+  @@map("deployment_jobs")
+}
+
+model QueueAlertSnooze {
+  id        Int      @id @default(autoincrement())
+  reason    String   @db.VarChar(500)
+  startsAt  DateTime @default(now()) @map("starts_at")
+  endsAt    DateTime @map("ends_at")
+  actorType String   @db.VarChar(50) @map("actor_type")
+  actorId   String   @db.VarChar(255) @map("actor_id")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([endsAt], map: "queue_alert_snoozes_ends_at_idx")
+  @@index([createdAt], map: "queue_alert_snoozes_created_at_idx")
+  @@map("queue_alert_snoozes")
+}
+
+model GithubWebhookDelivery {
+  id            Int      @id @default(autoincrement())
+  deliveryId    String   @unique @db.VarChar(120) @map("delivery_id")
+  eventName     String   @db.VarChar(120) @map("event_name")
+  processStatus String   @db.VarChar(20) @map("process_status")
+  attemptsCount Int      @default(1) @map("attempts_count")
+  duplicateCount Int     @default(0) @map("duplicate_count")
+  staleReclaims Int      @default(0) @map("stale_reclaims")
+  errorMessage  String?  @db.Text @map("error_message")
+  receivedAt    DateTime @default(now()) @map("received_at")
+  processedAt   DateTime? @map("processed_at")
+  lastAttemptAt DateTime @default(now()) @map("last_attempt_at")
+
+  @@index([processStatus, lastAttemptAt], map: "github_webhook_deliveries_process_status_last_attempt_at_idx")
+  @@map("github_webhook_deliveries")
+}
+
+model AdminRoleBinding {
+  id           Int      @id @default(autoincrement())
+  tokenHash    String   @unique @db.VarChar(128) @map("token_hash")
+  role         String   @db.VarChar(50)
+  description  String?  @db.VarChar(500)
+  source       String   @default("manual") @db.VarChar(50)
+  active       Boolean  @default(true)
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  @@index([active, role], map: "admin_role_bindings_active_role_idx")
+  @@map("admin_role_bindings")
+}

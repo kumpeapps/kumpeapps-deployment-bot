@@ -1,0 +1,49 @@
+services:
+  bot:
+    build: .
+    container_name: kumpeapps-deployment-bot
+    env_file:
+      - .env
+    volumes:
+      - ./.devcontainer/ssh:/workspaces/kumpeapps-deployment-bot/.devcontainer/ssh:ro
+    ports:
+      - "3000:3000"
+    depends_on:
+      mariadb:
+        condition: service_healthy
+    restart: unless-stopped
+
+  bot-test:
+    build:
+      context: .
+      target: builder
+    environment:
+      SECRET_ENCRYPTION_KEY: test-key-abcdefghijklmnop
+      DATABASE_URL: mysql://root:root@mariadb:3306/kumpeapps_bot
+      GITHUB_APP_WEBHOOK_SECRET: testsecret
+      ADMIN_API_TOKEN: testtoken
+    command: npm test
+    profiles:
+      - test
+
+  mariadb:
+    image: mariadb:11.4
+    container_name: kumpeapps-mariadb
+    environment:
+      MARIADB_ROOT_PASSWORD: root
+      MARIADB_DATABASE: kumpeapps_bot
+      MARIADB_USER: bot
+      MARIADB_PASSWORD: botpass
+    ports:
+      - "3306:3306"
+    volumes:
+      - mariadb_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mariadb-admin", "ping", "-h", "localhost", "-uroot", "-proot"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+volumes:
+  mariadb_data:

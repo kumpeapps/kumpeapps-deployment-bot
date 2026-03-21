@@ -1,0 +1,38 @@
+# Gitleaks configuration
+# https://github.com/gitleaks/gitleaks
+
+title = "KumpeApps Deployment Bot - Gitleaks Config"
+
+[extend]
+# Use the default gitleaks configuration as a base
+useDefault = true
+
+[allowlist]
+description = "Allowlist for documentation, example files, and source code with high-entropy function names"
+
+# Ignore common documentation patterns and source code
+paths = [
+  '''README\.md''',
+  '''README-ACTION\.md''',
+  '''ROADMAP\.md''',
+  '''docs/.*\.md''',
+  '''\.env\.example''',
+  '''docs/examples/.*\.yml''',
+  '''src/.*\.(ts|js)''',
+  '''prisma/.*''',
+  '''dist/.*''',
+  '''node_modules/.*''',
+  '''tsconfig\.json''',
+  '''package.*\.json''',
+]
+
+# Ignore example secret names in env_mappings sections of YAML and common false positives
+regexes = [
+  '''(DATABASE_URL|API_KEY|JWT_SECRET|DB_PASSWORD_SECRET|THIRD_PARTY_API_KEY|DB_CONNECTION_STRING|JWT_SECRET_KEY|DEV_DATABASE_URL|DEV_API_KEY|DEV_DB_URL|PROD_DATABASE_URL|PROD_API_KEY):\s*[A-Z_]+''',
+  '''KUMPEAPPS_DEPLOY_BOT_TOKEN''',
+  '''secrets\.[A-Z_]+''',
+]
+
+# Additional note: Source code files (src/**/*.ts, src/**/*.js) are excluded via paths
+# because high-entropy camelCase function names often trigger false positives.
+# Actual secrets should be in environment variables, not hardcoded in source.

@@ -1,0 +1,9 @@
+node_modules
+.env
+dist
+coverage
+.npm
+pnpm-lock.yaml
+package-lock.json
+yarn.lock
+.devcontainer/ssh/
