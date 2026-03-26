@@ -12,6 +12,8 @@ import {
   upsertInstallationRepositories
 } from "../services/installations.js";
 import { provisionRepositoryToken } from "../services/repository-tokens.js";
+import { provisionNebulaClients, deprovisionNebulaClients, revokeNebulaCertificate } from "../services/nebula-provisioning.js";
+import { initializeRepository } from "../services/repository-initialization.js";
 import { recordInvalidWebhookSignature } from "../services/webhook-security-health.js";
 import { processApprovalComment } from "../services/vm-approval.js";
 import { removeCaddyConfig } from "../services/ssh-deployer.js";
@@ -224,22 +226,27 @@ export async function registerWebhookRoutes(
       repositories
     });
 
-    // Provision API tokens for each repository
+    // Initialize each repository with automated setup
     for (const repo of repositories) {
-      const result = await provisionRepositoryToken({
+      const result = await initializeRepository({
         repositoryOwner: repo.owner,
         repositoryName: repo.name
       });
 
       if (result.success) {
         app.log.info(
-          { owner: repo.owner, repo: repo.name },
-          "Repository API token provisioned and pushed to GitHub"
+          { 
+            owner: repo.owner, 
+            repo: repo.name,
+            issueNumber: result.issueNumber,
+            prNumber: result.prNumber
+          },
+          "Repository initialized successfully"
         );
       } else {
-        app.log.warn(
+        app.log.error(
           { owner: repo.owner, repo: repo.name, error: result.error },
-          "Failed to provision repository API token"
+          "Failed to initialize repository"
         );
       }
     }
@@ -266,41 +273,79 @@ export async function registerWebhookRoutes(
       repositoriesRemoved: []
     });
 
-    // Provision API tokens for newly added repositories
+    // Initialize each newly added repository with automated setup
     for (const repo of repositoriesAdded) {
-      const result = await provisionRepositoryToken({
+      const result = await initializeRepository({
         repositoryOwner: repo.owner,
         repositoryName: repo.name
       });
 
       if (result.success) {
         app.log.info(
-          { owner: repo.owner, repo: repo.name },
-          "Repository API token provisioned and pushed to GitHub"
+          { 
+            owner: repo.owner, 
+            repo: repo.name,
+            issueNumber: result.issueNumber,
+            prNumber: result.prNumber
+          },
+          "Repository initialized successfully"
         );
       } else {
-        app.log.warn(
+        app.log.error(
           { owner: repo.owner, repo: repo.name, error: result.error },
-          "Failed to provision repository API token"
+          "Failed to initialize repository"
         );
       }
     }
   });
 
   webhooks.on("installation_repositories.removed", async ({ payload }: { payload: any }) => {
+    const repositoriesRemoved = payload.repositories_removed.map((repo: any) => {
+      const names = splitFullName(repo.full_name);
+      return {
+        owner: names.owner,
+        name: names.name,
+        defaultBranch: "main"
+      };
+    });
+
     await upsertInstallationRepositories({
       installationId: BigInt(payload.installation.id),
       accountLogin: installationAccountLogin(payload.installation.account),
       repositoriesAdded: [],
-      repositoriesRemoved: payload.repositories_removed.map((repo: any) => {
-        const names = splitFullName(repo.full_name);
-        return {
-          owner: names.owner,
-          name: names.name,
-          defaultBranch: "main"
-        };
-      })
+      repositoriesRemoved
     });
+
+    // Deprovision Nebula VPN clients for removed repositories
+    for (const repo of repositoriesRemoved) {
+      const nebulaResults = await deprovisionNebulaClients({
+        repositoryOwner: repo.owner,
+        repositoryName: repo.name
+      });
+
+      for (const envResult of nebulaResults) {
+        if (envResult.success) {
+          app.log.info(
+            { 
+              owner: repo.owner, 
+              repo: repo.name, 
+              environment: envResult.environment
+            },
+            "Nebula VPN client deprovisioned"
+          );
+        } else {
+          app.log.warn(
+            { 
+              owner: repo.owner, 
+              repo: repo.name, 
+              environment: envResult.environment,
+              error: envResult.error
+            },
+            "Failed to deprovision Nebula VPN client"
+          );
+        }
+      }
+    }
   });
 
   webhooks.on("issue_comment", async ({ payload }: { payload: any }) => {
@@ -768,6 +813,39 @@ export async function registerWebhookRoutes(
         }
       } else {
         app.log.warn({ vmId: vm.id }, "VM metadata missing environment, skipping Caddy cleanup");
+      }
+
+      // Revoke Nebula certificate for this environment
+      if (environment) {
+        try {
+          const nebulaResult = await revokeNebulaCertificate({
+            repositoryOwner: vm.repository.owner,
+            repositoryName: vm.repository.name,
+            environment: environment as "dev" | "stage" | "prod"
+          });
+
+          if (nebulaResult.success) {
+            app.log.info(
+              {
+                vmId: vm.id,
+                environment,
+                repository: `${vm.repository.owner}/${vm.repository.name}`
+              },
+              "Nebula certificate revoked for deleted VM"
+            );
+          } else {
+            app.log.warn(
+              { vmId: vm.id, environment, error: nebulaResult.error },
+              "Failed to revoke Nebula certificate"
+            );
+          }
+        } catch (nebulaError) {
+          // Log but don't fail the VM deletion if Nebula cert revocation fails
+          app.log.error(
+            { error: nebulaError, vmId: vm.id, environment },
+            "Failed to revoke Nebula certificate, continuing with VM deletion"
+          );
+        }
       }
 
       // Invalidate VM approval so new approval is required for next VM creation

@@ -177,13 +177,17 @@ Define one or more Caddy site blocks:
 caddy:
   - |
     example.com www.example.com {
-      reverse_proxy localhost:3000
+      reverse_proxy {{vm.ip}}:3000
     }
   - |
     api.example.com {
-      reverse_proxy localhost:8000
+      reverse_proxy {{nebula.ip}}:8000
     }
 ```
+
+**Placeholders:**
+- `{{vm.ip}}` - Replaced with the VM's IP address
+- `{{nebula.ip}}` - Replaced with the Nebula VPN IP address for the environment (from `{ENV}_NEBULA_IP` secret)
 
 Features:
 - Automatic HTTPS with Let's Encrypt
@@ -203,6 +207,17 @@ env_mappings:
   API_KEY: THIRD_PARTY_API_KEY
   JWT_SECRET: JWT_SECRET_KEY
 ```
+
+**Automatically available secrets:**
+
+The following secrets are automatically created when the bot is installed:
+- `KUMPEAPPS_DEPLOY_BOT_TOKEN` - Authentication token for the bot
+- `DEV_NEBULA_CLIENT_TOKEN` - Nebula VPN token for dev environment
+- `DEV_NEBULA_IP` - Nebula VPN IP address for dev environment
+- `STAGE_NEBULA_CLIENT_TOKEN` - Nebula VPN token for stage environment
+- `STAGE_NEBULA_IP` - Nebula VPN IP address for stage environment
+- `PROD_NEBULA_CLIENT_TOKEN` - Nebula VPN token for prod environment
+- `PROD_NEBULA_IP` - Nebula VPN IP address for prod environment
 
 **How secrets are synced:**
 
