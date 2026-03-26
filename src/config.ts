@@ -135,8 +135,64 @@ const EnvSchema = z.object({
   REPOSITORY_TOKEN_PROVISIONING_INTERVAL_MS: z.coerce.number().int().positive().default(3600000), // 1 hour
   WEBHOOK_RETRY_ENABLED: envBoolean().default(true),
   WEBHOOK_RETRY_MAX_ATTEMPTS: z.coerce.number().int().positive().max(10).default(3),
-  WEBHOOK_RETRY_INTERVAL_MS: z.coerce.number().int().positive().default(300000) // 5 minutes
+  WEBHOOK_RETRY_INTERVAL_MS: z.coerce.number().int().positive().default(300000), // 5 minutes
+  // Managed Nebula VPN provisioning
+  MANAGED_NEBULA_ENABLED: envBoolean().default(false),
+  MANAGED_NEBULA_API_URL: z.string().default(""),
+  MANAGED_NEBULA_API_KEY: z.string().default(""),
+  MANAGED_NEBULA_API_TIMEOUT_MS: z.coerce.number().int().positive().default(30000),
+  MANAGED_NEBULA_IP_POOL_ID: z.coerce.number().int().positive().default(1),
+  MANAGED_NEBULA_IP_GROUP_POOL_ID: z.coerce.number().int().positive().optional(),
+  // Environment-specific group IDs (comma-separated)
+  MANAGED_NEBULA_DEV_GROUP_IDS: z.string().default(""),
+  MANAGED_NEBULA_STAGE_GROUP_IDS: z.string().default(""),
+  MANAGED_NEBULA_PROD_GROUP_IDS: z.string().default(""),
+  // Environment-specific firewall ruleset IDs (comma-separated)
+  MANAGED_NEBULA_DEV_FIREWALL_RULE_IDS: z.string().default(""),
+  MANAGED_NEBULA_STAGE_FIREWALL_RULE_IDS: z.string().default(""),
+  MANAGED_NEBULA_PROD_FIREWALL_RULE_IDS: z.string().default("")
 });
 
-export type AppConfig = z.infer<typeof EnvSchema>;
-export const appConfig: AppConfig = EnvSchema.parse(process.env);
+// Helper to parse comma-separated IDs into number arrays
+function parseIdList(value: string): number[] {
+  if (!value || value.trim() === "") return [];
+  return value
+    .split(",")
+    .map((id) => id.trim())
+    .filter((id) => id !== "")
+    .map((id) => {
+      const parsed = parseInt(id, 10);
+      if (isNaN(parsed)) {
+        throw new Error(`Invalid ID in list: ${id}`);
+      }
+      return parsed;
+    });
+}
+
+export type AppConfig = Omit<z.infer<typeof EnvSchema>, 
+  | 'MANAGED_NEBULA_DEV_GROUP_IDS'
+  | 'MANAGED_NEBULA_STAGE_GROUP_IDS'
+  | 'MANAGED_NEBULA_PROD_GROUP_IDS'
+  | 'MANAGED_NEBULA_DEV_FIREWALL_RULE_IDS'
+  | 'MANAGED_NEBULA_STAGE_FIREWALL_RULE_IDS'
+  | 'MANAGED_NEBULA_PROD_FIREWALL_RULE_IDS'
+> & {
+  MANAGED_NEBULA_DEV_GROUP_IDS: number[];
+  MANAGED_NEBULA_STAGE_GROUP_IDS: number[];
+  MANAGED_NEBULA_PROD_GROUP_IDS: number[];
+  MANAGED_NEBULA_DEV_FIREWALL_RULE_IDS: number[];
+  MANAGED_NEBULA_STAGE_FIREWALL_RULE_IDS: number[];
+  MANAGED_NEBULA_PROD_FIREWALL_RULE_IDS: number[];
+};
+
+const parsedEnv = EnvSchema.parse(process.env);
+
+export const appConfig: AppConfig = {
+  ...parsedEnv,
+  MANAGED_NEBULA_DEV_GROUP_IDS: parseIdList(parsedEnv.MANAGED_NEBULA_DEV_GROUP_IDS),
+  MANAGED_NEBULA_STAGE_GROUP_IDS: parseIdList(parsedEnv.MANAGED_NEBULA_STAGE_GROUP_IDS),
+  MANAGED_NEBULA_PROD_GROUP_IDS: parseIdList(parsedEnv.MANAGED_NEBULA_PROD_GROUP_IDS),
+  MANAGED_NEBULA_DEV_FIREWALL_RULE_IDS: parseIdList(parsedEnv.MANAGED_NEBULA_DEV_FIREWALL_RULE_IDS),
+  MANAGED_NEBULA_STAGE_FIREWALL_RULE_IDS: parseIdList(parsedEnv.MANAGED_NEBULA_STAGE_FIREWALL_RULE_IDS),
+  MANAGED_NEBULA_PROD_FIREWALL_RULE_IDS: parseIdList(parsedEnv.MANAGED_NEBULA_PROD_FIREWALL_RULE_IDS)
+};

@@ -559,10 +559,25 @@ export async function executeDeployment(input: ExecuteDeploymentInput): Promise<
       deployment.id,
       "caddy.deploy_config",
       async () => {
-        // Replace {{vm.ip}} in all Caddy config files
+        // Replace placeholders in all Caddy config files
         const processedCaddyConfig: Record<string, string> = {};
+        
+        // Get Nebula IP from secrets (environment-specific)
+        const nebulaIpSecretName = `${input.environment.toUpperCase()}_NEBULA_IP`;
+        const nebulaIp = resolvedSecrets.envValues[nebulaIpSecretName];
+        
         for (const [fileName, content] of Object.entries(input.config.caddy)) {
-          processedCaddyConfig[fileName] = content.replace(/\{\{vm\.ip\}\}/g, vmIp!);
+          let processed = content;
+          
+          // Replace VM IP placeholder
+          processed = processed.replace(/\{\{vm\.ip\}\}/g, vmIp!);
+          
+          // Replace Nebula IP placeholder (if Nebula IP is available)
+          if (nebulaIp) {
+            processed = processed.replace(/\{\{nebula\.ip\}\}/g, nebulaIp);
+          }
+          
+          processedCaddyConfig[fileName] = processed;
         }
         
         return deployCaddyConfig({
