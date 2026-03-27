@@ -43,9 +43,7 @@ runs:
         echo ""
         
         # Get all environment variables, excluding system/GitHub Actions variables
-        # We'll sync anything that looks like a secret (uppercase with underscores)
         SECRET_NAMES=$(env | grep -E '^[A-Z][A-Z0-9_]*=' | cut -d= -f1 | grep -v -E '^(GITHUB_|RUNNER_|CI|PATH|HOME|USER|SHELL|PWD|OLDPWD|LANG|LC_|TERM|SHLVL|_|BOT_URL|BOT_TOKEN|ACTIONS_|AGENT_|ANDROID_|AZURE_|CHROME|CONDA|DEPLOYMENT_|DOTNET_|GOROOT|GRADLE_|GRAALVM_|HOMEBREW_|ImageOS|ImageVersion|INVOCATION_ID|JAVA_|JOURNAL_STREAM|LEIN_|NVM_|PERFLOG_|POWERSHELL_|SELENIUM_|SGX_|STATS_|SWIFT_|VCPKG_|INPUT_)')
-        
         if [ -z "$SECRET_NAMES" ]; then
           echo "::warning::No secrets found in environment variables to sync"
           echo "::warning::Make sure to pass your secrets in the env section of the action"
@@ -56,7 +54,6 @@ runs:
         FAILED=0
         
         for SECRET_NAME in $SECRET_NAMES; do
-          # Skip KUMPEAPPS_DEPLOY_BOT_TOKEN itself
           if [ "$SECRET_NAME" = "KUMPEAPPS_DEPLOY_BOT_TOKEN" ]; then
             continue
           fi
