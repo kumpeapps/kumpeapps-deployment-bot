@@ -3,7 +3,7 @@ import { Webhooks } from "@octokit/webhooks";
 import { appConfig } from "../config.js";
 import { prisma } from "../db.js";
 import { enqueueDeploymentJob } from "../services/deployment-queue.js";
-import { branchFromRef, matchesDeployRules } from "../services/deploy-rules.js";
+import { branchFromRef, matchesDeployRules, getDeployLabels, matchesReleaseRules } from "../services/deploy-rules.js";
 import { syncRepositoryDeploymentConfigs } from "../services/github-config-sync.js";
 import { DeploymentConfigSchema } from "../schemas/deployment-config.js";
 import {
@@ -14,6 +14,7 @@ import {
 import { provisionRepositoryToken } from "../services/repository-tokens.js";
 import { provisionNebulaClients, deprovisionNebulaClients, revokeNebulaCertificate } from "../services/nebula-provisioning.js";
 import { initializeRepository } from "../services/repository-initialization.js";
+import { addRepositoryCollaborator, acceptRepositoryInvitation } from "../services/github-automation.js";
 import { recordInvalidWebhookSignature } from "../services/webhook-security-health.js";
 import { processApprovalComment } from "../services/vm-approval.js";
 import { removeCaddyConfig } from "../services/ssh-deployer.js";
@@ -156,6 +157,33 @@ export async function registerWebhookRoutes(
       return;
     }
 
+    // Get GitHub token for PR label checking
+    const token = await getGitHubToken(owner, name);
+
+    // Fetch open PRs for this branch to check labels
+    let openPRsForBranch: Array<{ number: number; labels: Array<{ name: string }> }> = [];
+    try {
+      const prsResponse = await fetch(
+        `https://api.github.com/repos/${owner}/${name}/pulls?state=open&head=${owner}:${branch}`,
+        {
+          headers: {
+            'Authorization': `Bearer ${token}`,
+            'Accept': 'application/vnd.github+json'
+          }
+        }
+      );
+
+      if (prsResponse.ok) {
+        openPRsForBranch = await prsResponse.json() as Array<{ number: number; labels: Array<{ name: string }> }>;
+        app.log.info(
+          { fullName, branch, prCount: openPRsForBranch.length },
+          "Found open PRs for branch"
+        );
+      }
+    } catch (error) {
+      app.log.warn({ error, fullName, branch }, "Failed to fetch PRs for branch; continuing with branch-only matching");
+    }
+
     for (const snapshot of configSnapshots) {
       const configParsed = DeploymentConfigSchema.safeParse(snapshot.parsedJson);
       if (!configParsed.success) {
@@ -163,12 +191,81 @@ export async function registerWebhookRoutes(
         continue;
       }
 
-      const matches = matchesDeployRules(configParsed.data, branch, snapshot.environment);
-      if (!matches) {
-        app.log.info(
-          { configPath: snapshot.configPath, environment: snapshot.environment, branch },
-          "Config deploy rules do not match branch; skipping"
+      // Check if this config requires label-based deployment
+      const deployLabels = getDeployLabels(configParsed.data, snapshot.environment);
+      
+      let shouldDeploy = false;
+      let deployReason = "";
+
+      if (deployLabels.length > 0) {
+        // Label-based deployment: check if any open PR for this branch has required labels
+        const prWithLabel = openPRsForBranch.find(pr => 
+          pr.labels.some(label => deployLabels.includes(label.name))
         );
+
+        if (prWithLabel) {
+          const matchingLabel = prWithLabel.labels.find(l => deployLabels.includes(l.name))?.name;
+          
+          // Check if branch patterns are also specified
+          const ruleForEnv = configParsed.data.deploy_rules.find(r => r.environment === snapshot.environment);
+          const hasBranchPatterns = ruleForEnv?.branches && 
+            (ruleForEnv.branches.include.length > 0 || ruleForEnv.branches.exclude.length > 0);
+
+          if (hasBranchPatterns && ruleForEnv?.branches) {
+            // Both label and branch patterns required
+            const included = ruleForEnv.branches.include.length === 0 || 
+              ruleForEnv.branches.include.includes(branch);
+            const excluded = ruleForEnv.branches.exclude.includes(branch);
+            const branchMatches = included && !excluded;
+
+            if (branchMatches) {
+              shouldDeploy = true;
+              deployReason = `PR #${prWithLabel.number} has label "${matchingLabel}" and branch matches patterns`;
+              app.log.info(
+                { configPath: snapshot.configPath, environment: snapshot.environment, prNumber: prWithLabel.number, label: matchingLabel, branch },
+                "Label-based deployment with branch filtering - condition met"
+              );
+            } else {
+              app.log.info(
+                { configPath: snapshot.configPath, environment: snapshot.environment, prNumber: prWithLabel.number, label: matchingLabel, branch },
+                "PR has required label but branch does not match patterns; skipping"
+              );
+            }
+          } else {
+            // Label only, no branch restrictions
+            shouldDeploy = true;
+            deployReason = `PR #${prWithLabel.number} has label "${matchingLabel}"`;
+            app.log.info(
+              { configPath: snapshot.configPath, environment: snapshot.environment, prNumber: prWithLabel.number, label: matchingLabel },
+              "Label-based deployment condition met (no branch restrictions)"
+            );
+          }
+        } else {
+          app.log.info(
+            { configPath: snapshot.configPath, environment: snapshot.environment, branch, requiredLabels: deployLabels },
+            "No open PR with required labels; skipping label-based deployment"
+          );
+        }
+      } else {
+        // Traditional branch-based deployment
+        const matches = matchesDeployRules(configParsed.data, branch, snapshot.environment);
+        if (matches) {
+          shouldDeploy = true;
+          deployReason = "branch matches deploy rules";
+          
+          app.log.info(
+            { configPath: snapshot.configPath, environment: snapshot.environment, branch },
+            "Branch-based deployment condition met"
+          );
+        } else {
+          app.log.info(
+            { configPath: snapshot.configPath, environment: snapshot.environment, branch },
+            "Config deploy rules do not match branch; skipping"
+          );
+        }
+      }
+
+      if (!shouldDeploy) {
         continue;
       }
 
@@ -176,6 +273,7 @@ export async function registerWebhookRoutes(
         { 
           configPath: snapshot.configPath, 
           environment: snapshot.environment,
+          reason: deployReason,
           dryRun: appConfig.AUTO_DEPLOY_DRY_RUN,
           virtualizorMode: appConfig.VIRTUALIZOR_MODE
         },
@@ -226,6 +324,39 @@ export async function registerWebhookRoutes(
       repositories
     });
 
+    // Add kumpeapps-bot-deploy as collaborator to each repository
+    for (const repo of repositories) {
+      try {
+        await addRepositoryCollaborator({
+          repositoryOwner: repo.owner,
+          repositoryName: repo.name,
+          username: "kumpeapps-bot-deploy",
+          permission: "push"
+        });
+        app.log.info(
+          { owner: repo.owner, repo: repo.name },
+          "Added kumpeapps-bot-deploy as collaborator"
+        );
+
+        // Auto-accept the invitation (for personal repos where invitation is pending)
+        const accepted = await acceptRepositoryInvitation({
+          repositoryOwner: repo.owner,
+          repositoryName: repo.name
+        });
+        if (accepted) {
+          app.log.info(
+            { owner: repo.owner, repo: repo.name },
+            "Auto-accepted collaborator invitation for kumpeapps-bot-deploy"
+          );
+        }
+      } catch (error) {
+        app.log.warn(
+          { owner: repo.owner, repo: repo.name, error },
+          "Failed to add kumpeapps-bot-deploy as collaborator"
+        );
+      }
+    }
+
     // Initialize each repository with automated setup
     for (const repo of repositories) {
       const result = await initializeRepository({
@@ -253,7 +384,8 @@ export async function registerWebhookRoutes(
   });
 
   webhooks.on("installation.deleted", async ({ payload }: { payload: any }) => {
-    await markInstallationInactive(BigInt(payload.installation.id));
+    const installationId = BigInt(payload.installation.id);
+    await markInstallationInactive(installationId);
   });
 
   webhooks.on("installation_repositories.added", async ({ payload }: { payload: any }) => {
@@ -272,6 +404,39 @@ export async function registerWebhookRoutes(
       repositoriesAdded,
       repositoriesRemoved: []
     });
+
+    // Add kumpeapps-bot-deploy as collaborator to enable PR/issue management
+    for (const repo of repositoriesAdded) {
+      try {
+        await addRepositoryCollaborator({
+          repositoryOwner: repo.owner,
+          repositoryName: repo.name,
+          username: "kumpeapps-bot-deploy",
+          permission: "push"
+        });
+        app.log.info(
+          { owner: repo.owner, repo: repo.name },
+          "Added kumpeapps-bot-deploy as collaborator"
+        );
+
+        // Auto-accept the invitation (for personal repos where invitation is pending)
+        const accepted = await acceptRepositoryInvitation({
+          repositoryOwner: repo.owner,
+          repositoryName: repo.name
+        });
+        if (accepted) {
+          app.log.info(
+            { owner: repo.owner, repo: repo.name },
+            "Auto-accepted collaborator invitation for kumpeapps-bot-deploy"
+          );
+        }
+      } catch (error) {
+        app.log.warn(
+          { owner: repo.owner, repo: repo.name, error: String(error) },
+          "Failed to add kumpeapps-bot-deploy as collaborator - continuing initialization"
+        );
+      }
+    }
 
     // Initialize each newly added repository with automated setup
     for (const repo of repositoriesAdded) {
@@ -316,8 +481,9 @@ export async function registerWebhookRoutes(
       repositoriesRemoved
     });
 
-    // Deprovision Nebula VPN clients for removed repositories
+    // Deprovision Nebula VPN clients and clean up secrets for removed repositories
     for (const repo of repositoriesRemoved) {
+      // Deprovision Nebula clients
       const nebulaResults = await deprovisionNebulaClients({
         repositoryOwner: repo.owner,
         repositoryName: repo.name
@@ -557,6 +723,314 @@ export async function registerWebhookRoutes(
     }
   });
 
+  webhooks.on("pull_request.labeled", async ({ payload }: { payload: any }) => {
+    if (!appConfig.AUTO_DEPLOY_ENABLED) {
+      app.log.info("Auto deploy skipped: AUTO_DEPLOY_ENABLED is false");
+      return;
+    }
+
+    const fullName = payload.repository.full_name;
+    const [owner, name] = fullName.split("/");
+    const prNumber = payload.pull_request.number;
+    const prHeadRef = payload.pull_request.head.ref;
+    const prHeadSha = payload.pull_request.head.sha;
+    const labelName = payload.label.name;
+
+    app.log.info(
+      { fullName, prNumber, labelName, branch: prHeadRef },
+      "Processing pull_request.labeled event"
+    );
+
+    if (!owner || !name) {
+      app.log.warn({ fullName }, "Skipping label-based deploy due to malformed repository full name");
+      return;
+    }
+
+    const repository = await prisma.repository.findUnique({
+      where: {
+        owner_name: {
+          owner,
+          name
+        }
+      }
+    });
+
+    if (!repository) {
+      app.log.info({ fullName }, "Skipping label-based deploy for repository not in control plane");
+      return;
+    }
+
+    try {
+      const syncResult = await retryWithBackoff({
+        attempts: appConfig.WEBHOOK_SYNC_RETRY_ATTEMPTS,
+        baseDelayMs: appConfig.WEBHOOK_SYNC_RETRY_BASE_DELAY_MS,
+        run: async () =>
+          syncRepositoryDeploymentConfigs({
+            repositoryOwner: owner,
+            repositoryName: name,
+            ref: prHeadSha
+          }),
+        onRetry: (error, attempt) => {
+          app.log.warn(
+            { error, fullName, attempt },
+            "Config sync failed on PR label; retrying"
+          );
+        }
+      });
+      
+      app.log.info(
+        { fullName, synced: syncResult.synced, skipped: syncResult.skipped, errors: syncResult.errors },
+        "Config sync completed on PR label"
+      );
+    } catch (error) {
+      app.log.warn({ error, fullName }, "Config sync failed on PR label; continuing with existing snapshots");
+    }
+
+    const configSnapshots = await prisma.deploymentConfig.findMany({
+      where: { repositoryId: repository.id }
+    });
+
+    if (configSnapshots.length === 0) {
+      app.log.info({ fullName }, "No deployment configs found; label-based deploy skipped");
+      return;
+    }
+
+    // Get GitHub token for API operations
+    const token = await getGitHubToken(owner, name);
+
+    // Track which configs match this label
+    let deploymentsQueued = 0;
+
+    for (const snapshot of configSnapshots) {
+      const configParsed = DeploymentConfigSchema.safeParse(snapshot.parsedJson);
+      if (!configParsed.success) {
+        app.log.warn({ configPath: snapshot.configPath }, "Skipping invalid stored deployment config snapshot");
+        continue;
+      }
+
+      const deployLabels = getDeployLabels(configParsed.data, snapshot.environment);
+      if (!deployLabels.includes(labelName)) {
+        app.log.info(
+          { configPath: snapshot.configPath, environment: snapshot.environment, labelName },
+          "Label not configured for this deployment config; skipping"
+        );
+        continue;
+      }
+
+      // This config matches the label - queue deployment
+      app.log.info(
+        { 
+          configPath: snapshot.configPath, 
+          environment: snapshot.environment,
+          prNumber,
+          labelName,
+          dryRun: appConfig.AUTO_DEPLOY_DRY_RUN
+        },
+        "Queueing label-based deploy"
+      );
+
+      const { jobId } = await enqueueDeploymentJob({
+        label: `${owner}/${name}:${snapshot.environment}:${snapshot.configPath}`,
+        payload: {
+          repositoryOwner: owner,
+          repositoryName: name,
+          environment: snapshot.environment as "dev" | "stage" | "prod",
+          commitSha: prHeadSha,
+          triggeredBy: payload.sender.login,
+          caddyHost: appConfig.AUTO_DEPLOY_CADDY_HOST,
+          configPath: snapshot.configPath,
+          config: configParsed.data,
+          dryRun: appConfig.AUTO_DEPLOY_DRY_RUN
+        },
+        timeoutMs: appConfig.DEPLOY_QUEUE_JOB_TIMEOUT_MS
+      });
+
+      app.log.info(
+        { jobId, configPath: snapshot.configPath, environment: snapshot.environment },
+        "Label-based deploy queued"
+      );
+
+      deploymentsQueued++;
+
+      // Remove this label from all other open PRs
+      try {
+        const prsResponse = await fetch(
+          `https://api.github.com/repos/${owner}/${name}/pulls?state=open`,
+          {
+            headers: {
+              'Authorization': `Bearer ${token}`,
+              'Accept': 'application/vnd.github+json'
+            }
+          }
+        );
+
+        if (prsResponse.ok) {
+          const prs = await prsResponse.json() as Array<{ number: number; labels: Array<{ name: string }> }>;
+          
+          for (const pr of prs) {
+            // Skip the current PR
+            if (pr.number === prNumber) {
+              continue;
+            }
+
+            // Check if this PR has the label
+            const hasLabel = pr.labels.some(l => l.name === labelName);
+            if (hasLabel) {
+              app.log.info(
+                { prNumber: pr.number, labelName },
+                "Removing label from other PR"
+              );
+
+              await fetch(
+                `https://api.github.com/repos/${owner}/${name}/issues/${pr.number}/labels/${encodeURIComponent(labelName)}`,
+                {
+                  method: 'DELETE',
+                  headers: {
+                    'Authorization': `Bearer ${token}`,
+                    'Accept': 'application/vnd.github+json'
+                  }
+                }
+              );
+            }
+          }
+        }
+      } catch (error) {
+        app.log.warn(
+          { error, labelName },
+          "Failed to remove label from other PRs"
+        );
+      }
+    }
+
+    if (deploymentsQueued === 0) {
+      app.log.info(
+        { fullName, labelName },
+        "Label did not match any deployment config rules"
+      );
+    }
+  });
+
+  webhooks.on("release.published", async ({ payload }: { payload: any }) => {
+    if (!appConfig.AUTO_DEPLOY_ENABLED) {
+      app.log.info("Auto deploy skipped: AUTO_DEPLOY_ENABLED is false");
+      return;
+    }
+
+    const fullName = payload.repository.full_name;
+    const [owner, name] = fullName.split("/");
+    const releaseTag = payload.release.tag_name;
+    const releaseCommitSha = payload.release.target_commitish;
+    const isPrerelease = payload.release.prerelease === true;
+
+    app.log.info(
+      { fullName, releaseTag, isPrerelease, commitSha: releaseCommitSha },
+      "Processing release.published event"
+    );
+
+    if (!owner || !name) {
+      app.log.warn({ fullName }, "Skipping release-based deploy due to malformed repository full name");
+      return;
+    }
+
+    const repository = await prisma.repository.findUnique({
+      where: {
+        owner_name: {
+          owner,
+          name
+        }
+      }
+    });
+
+    if (!repository) {
+      app.log.info({ fullName }, "Skipping release-based deploy for repository not in control plane");
+      return;
+    }
+
+    try {
+      const syncResult = await retryWithBackoff({
+        attempts: appConfig.WEBHOOK_SYNC_RETRY_ATTEMPTS,
+        baseDelayMs: appConfig.WEBHOOK_SYNC_RETRY_BASE_DELAY_MS,
+        run: async () =>
+          syncRepositoryDeploymentConfigs({
+            repositoryOwner: owner,
+            repositoryName: name,
+            ref: releaseCommitSha
+          }),
+        onRetry: (error, attempt) => {
+          app.log.warn(
+            { error, fullName, attempt },
+            "Config sync failed on release; retrying"
+          );
+        }
+      });
+      
+      app.log.info(
+        { fullName, synced: syncResult.synced, skipped: syncResult.skipped, errors: syncResult.errors },
+        "Config sync completed on release"
+      );
+    } catch (error) {
+      app.log.warn({ error, fullName }, "Config sync failed on release; continuing with existing snapshots");
+    }
+
+    const configSnapshots = await prisma.deploymentConfig.findMany({
+      where: { repositoryId: repository.id }
+    });
+
+    if (configSnapshots.length === 0) {
+      app.log.info({ fullName }, "No deployment configs found; release-based deploy skipped");
+      return;
+    }
+
+    for (const snapshot of configSnapshots) {
+      const configParsed = DeploymentConfigSchema.safeParse(snapshot.parsedJson);
+      if (!configParsed.success) {
+        app.log.warn({ configPath: snapshot.configPath }, "Skipping invalid stored deployment config snapshot");
+        continue;
+      }
+
+      const matches = matchesReleaseRules(configParsed.data, snapshot.environment, "published", isPrerelease);
+      if (!matches) {
+        app.log.info(
+          { configPath: snapshot.configPath, environment: snapshot.environment, releaseTag, isPrerelease },
+          "Release does not match deploy rules; skipping"
+        );
+        continue;
+      }
+
+      app.log.info(
+        { 
+          configPath: snapshot.configPath, 
+          environment: snapshot.environment,
+          releaseTag,
+          isPrerelease,
+          dryRun: appConfig.AUTO_DEPLOY_DRY_RUN
+        },
+        "Queueing release-based deploy"
+      );
+
+      const { jobId } = await enqueueDeploymentJob({
+        label: `${owner}/${name}:${snapshot.environment}:${snapshot.configPath}`,
+        payload: {
+          repositoryOwner: owner,
+          repositoryName: name,
+          environment: snapshot.environment as "dev" | "stage" | "prod",
+          commitSha: releaseCommitSha,
+          triggeredBy: payload.sender.login,
+          caddyHost: appConfig.AUTO_DEPLOY_CADDY_HOST,
+          configPath: snapshot.configPath,
+          config: configParsed.data,
+          dryRun: appConfig.AUTO_DEPLOY_DRY_RUN
+        },
+        timeoutMs: appConfig.DEPLOY_QUEUE_JOB_TIMEOUT_MS
+      });
+
+      app.log.info(
+        { jobId, configPath: snapshot.configPath, environment: snapshot.environment, releaseTag },
+        "Release-based deploy queued"
+      );
+    }
+  });
+
   webhooks.onAny(async ({ id, name, payload }: { id: string; name: string; payload: any }) => {
     const installationId =
       payload && typeof payload === "object" && "installation" in payload
@@ -750,52 +1224,43 @@ export async function registerWebhookRoutes(
               status: "success"
             },
             orderBy: { finishedAt: "desc" },
-            take: 1
+            take: 1,
+            include: {
+              caddyReleases: {
+                orderBy: { createdAt: "desc" },
+                take: 1
+              }
+            }
           });
 
-          if (latestDeployment) {
-            // Get the deployment config to extract Caddy file names
-            const deploymentConfig = await prisma.deploymentConfig.findFirst({
-              where: {
-                repositoryId: vm.repository.id,
-                environment
-              },
-              orderBy: { updatedAt: "desc" },
-              take: 1
-            });
+          if (latestDeployment && latestDeployment.caddyReleases.length > 0) {
+            const caddyRelease = latestDeployment.caddyReleases[0];
+            const caddyFileNames = caddyRelease.deployedFiles as string[];
 
-            if (deploymentConfig?.parsedJson) {
-              const config = deploymentConfig.parsedJson as {
-                caddy?: Record<string, string>;
-              };
+            if (caddyFileNames && caddyFileNames.length > 0) {
+              app.log.info(
+                {
+                  vmId: vm.id,
+                  environment,
+                  caddyFiles: caddyFileNames
+                },
+                "Removing Caddy config files for deleted VM"
+              );
 
-              if (config.caddy && Object.keys(config.caddy).length > 0) {
-                const caddyFileNames = Object.keys(config.caddy);
-                
-                app.log.info(
-                  {
-                    vmId: vm.id,
-                    environment,
-                    caddyFiles: caddyFileNames
-                  },
-                  "Removing Caddy config files for deleted VM"
-                );
+              const cleanupResult = await removeCaddyConfig({
+                caddyHost: appConfig.AUTO_DEPLOY_CADDY_HOST,
+                fileNames: caddyFileNames,
+                sshUser: appConfig.CADDY_SSH_USER,
+                sshKeyPath: appConfig.CADDY_SSH_KEY_PATH,
+                sshPort: appConfig.CADDY_SSH_PORT,
+                remoteConfigDir: appConfig.CADDY_CONFIG_DIR,
+                reloadCommand: appConfig.CADDY_RELOAD_COMMAND
+              });
 
-                const cleanupResult = await removeCaddyConfig({
-                  caddyHost: appConfig.AUTO_DEPLOY_CADDY_HOST,
-                  fileNames: caddyFileNames,
-                  sshUser: appConfig.CADDY_SSH_USER,
-                  sshKeyPath: appConfig.CADDY_SSH_KEY_PATH,
-                  sshPort: appConfig.CADDY_SSH_PORT,
-                  remoteConfigDir: appConfig.CADDY_CONFIG_DIR,
-                  reloadCommand: appConfig.CADDY_RELOAD_COMMAND
-                });
-
-                deletionResult.caddyCleanup = cleanupResult;
-                app.log.info({ vmId: vm.id, result: cleanupResult }, "Caddy config cleanup completed");
-              } else {
-                app.log.info({ vmId: vm.id }, "No Caddy config found for this deployment");
-              }
+              deletionResult.caddyCleanup = cleanupResult;
+              app.log.info({ vmId: vm.id, result: cleanupResult }, "Caddy config cleanup completed");
+            } else {
+              app.log.info({ vmId: vm.id }, "No Caddy files recorded for cleanup");
             }
           } else {
             app.log.info(

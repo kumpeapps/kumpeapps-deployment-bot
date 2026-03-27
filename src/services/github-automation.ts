@@ -9,6 +9,7 @@
  * - Creating pull requests
  */
 
+import { appConfig } from "../config.js";
 import { getGitHubToken } from "./github-app-auth.js";
 import { recordAuditEvent } from "./audit.js";
 
@@ -18,6 +19,7 @@ interface CreateIssueInput {
   title: string;
   body: string;
   labels?: string[];
+  assignees?: string[];
 }
 
 interface CreateIssueResponse {
@@ -56,6 +58,7 @@ interface CreatePullRequestInput {
   body: string;
   head: string; // branch name
   base?: string; // defaults to default branch
+  assignees?: string[];
 }
 
 interface CreatePullRequestResponse {
@@ -86,6 +89,7 @@ export async function createGitHubIssue(input: CreateIssueInput): Promise<Create
       title: input.title,
       body: input.body,
       labels: input.labels ?? []
+      // Note: assignees assigned separately to handle pending invitations
     }),
     signal: AbortSignal.timeout(15000)
   });
@@ -97,6 +101,33 @@ export async function createGitHubIssue(input: CreateIssueInput): Promise<Create
   }
 
   const issue = await response.json() as CreateIssueResponse;
+
+  // Try to assign issue if assignees were provided (non-fatal if it fails due to pending invitations)
+  if (input.assignees && input.assignees.length > 0) {
+    try {
+      const assignUrl = `https://api.github.com/repos/${encodeURIComponent(input.repositoryOwner)}/${encodeURIComponent(input.repositoryName)}/issues/${issue.number}`;
+      const assignResponse = await fetch(assignUrl, {
+        method: "PATCH",
+        headers: {
+          "Accept": "application/vnd.github+json",
+          "Authorization": `Bearer ${token}`,
+          "User-Agent": "kumpeapps-deployment-bot",
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          assignees: input.assignees
+        }),
+        signal: AbortSignal.timeout(15000)
+      });
+
+      if (!assignResponse.ok) {
+        const errorText = await assignResponse.text();
+        console.warn(`Failed to assign issue: HTTP ${assignResponse.status} - ${errorText}`);
+      }
+    } catch (error) {
+      console.warn(`Failed to assign issue:`, error);
+    }
+  }
 
   await recordAuditEvent({
     actorType: "system",
@@ -379,6 +410,7 @@ export async function createGitHubPullRequest(input: CreatePullRequestInput): Pr
       body: input.body,
       head: input.head,
       base: baseBranch
+      // Note: assignees assigned separately to handle pending invitations
     }),
     signal: AbortSignal.timeout(15000)
   });
@@ -390,6 +422,33 @@ export async function createGitHubPullRequest(input: CreatePullRequestInput): Pr
   }
 
   const pr = await response.json() as CreatePullRequestResponse;
+
+  // Try to assign PR if assignees were provided (non-fatal if it fails due to pending invitations)
+  if (input.assignees && input.assignees.length > 0) {
+    try {
+      const assignUrl = `https://api.github.com/repos/${encodeURIComponent(input.repositoryOwner)}/${encodeURIComponent(input.repositoryName)}/issues/${pr.number}`;
+      const assignResponse = await fetch(assignUrl, {
+        method: "PATCH",
+        headers: {
+          "Accept": "application/vnd.github+json",
+          "Authorization": `Bearer ${token}`,
+          "User-Agent": "kumpeapps-deployment-bot",
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          assignees: input.assignees
+        }),
+        signal: AbortSignal.timeout(15000)
+      });
+
+      if (!assignResponse.ok) {
+        const errorText = await assignResponse.text();
+        console.warn(`Failed to assign pull request: HTTP ${assignResponse.status} - ${errorText}`);
+      }
+    } catch (error) {
+      console.warn(`Failed to assign pull request:`, error);
+    }
+  }
 
   await recordAuditEvent({
     actorType: "system",
@@ -408,6 +467,239 @@ export async function createGitHubPullRequest(input: CreatePullRequestInput): Pr
   });
 
   return pr;
+}
+
+/**
+ * Create multiple files in a single commit using Git Tree API
+ */
+export async function createMultipleFilesInSingleCommit(input: {
+  repositoryOwner: string;
+  repositoryName: string;
+  branch: string;
+  files: Array<{ path: string; content: string }>;
+  message: string;
+}): Promise<void> {
+  const token = await getGitHubToken(input.repositoryOwner, input.repositoryName);
+  if (!token) {
+    throw new Error("No GitHub token available");
+  }
+
+  // Get the current commit SHA of the branch
+  const refUrl = `https://api.github.com/repos/${encodeURIComponent(input.repositoryOwner)}/${encodeURIComponent(input.repositoryName)}/git/refs/heads/${encodeURIComponent(input.branch)}`;
+  const refResponse = await fetch(refUrl, {
+    headers: {
+      "Accept": "application/vnd.github+json",
+      "Authorization": `Bearer ${token}`,
+      "User-Agent": "kumpeapps-deployment-bot"
+    },
+    signal: AbortSignal.timeout(15000)
+  });
+
+  if (!refResponse.ok) {
+    throw new Error(`Failed to get branch ref: HTTP ${refResponse.status}`);
+  }
+
+  const refData = await refResponse.json() as { object: { sha: string } };
+  const currentCommitSha = refData.object.sha;
+
+  // Get the tree SHA of the current commit
+  const commitUrl = `https://api.github.com/repos/${encodeURIComponent(input.repositoryOwner)}/${encodeURIComponent(input.repositoryName)}/git/commits/${currentCommitSha}`;
+  const commitResponse = await fetch(commitUrl, {
+    headers: {
+      "Accept": "application/vnd.github+json",
+      "Authorization": `Bearer ${token}`,
+      "User-Agent": "kumpeapps-deployment-bot"
+    },
+    signal: AbortSignal.timeout(15000)
+  });
+
+  if (!commitResponse.ok) {
+    throw new Error(`Failed to get commit: HTTP ${commitResponse.status}`);
+  }
+
+  const commitData = await commitResponse.json() as { tree: { sha: string } };
+  const baseTreeSha = commitData.tree.sha;
+
+  // Create blobs for each file
+  const treeItems = await Promise.all(
+    input.files.map(async (file) => {
+      const blobUrl = `https://api.github.com/repos/${encodeURIComponent(input.repositoryOwner)}/${encodeURIComponent(input.repositoryName)}/git/blobs`;
+      const blobResponse = await fetch(blobUrl, {
+        method: "POST",
+        headers: {
+          "Accept": "application/vnd.github+json",
+          "Authorization": `Bearer ${token}`,
+          "User-Agent": "kumpeapps-deployment-bot",
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          content: file.content,
+          encoding: "utf-8"
+        }),
+        signal: AbortSignal.timeout(15000)
+      });
+
+      if (!blobResponse.ok) {
+        throw new Error(`Failed to create blob for ${file.path}: HTTP ${blobResponse.status}`);
+      }
+
+      const blobData = await blobResponse.json() as { sha: string };
+      return {
+        path: file.path,
+        mode: "100644" as const,
+        type: "blob" as const,
+        sha: blobData.sha
+      };
+    })
+  );
+
+  // Create a new tree
+  const treeUrl = `https://api.github.com/repos/${encodeURIComponent(input.repositoryOwner)}/${encodeURIComponent(input.repositoryName)}/git/trees`;
+  const treeResponse = await fetch(treeUrl, {
+    method: "POST",
+    headers: {
+      "Accept": "application/vnd.github+json",
+      "Authorization": `Bearer ${token}`,
+      "User-Agent": "kumpeapps-deployment-bot",
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      base_tree: baseTreeSha,
+      tree: treeItems
+    }),
+    signal: AbortSignal.timeout(15000)
+  });
+
+  if (!treeResponse.ok) {
+    const errorText = await treeResponse.text();
+    throw new Error(`Failed to create tree: HTTP ${treeResponse.status} - ${errorText}`);
+  }
+
+  const treeData = await treeResponse.json() as { sha: string };
+  const newTreeSha = treeData.sha;
+
+  // Create a new commit
+  const newCommitUrl = `https://api.github.com/repos/${encodeURIComponent(input.repositoryOwner)}/${encodeURIComponent(input.repositoryName)}/git/commits`;
+  const newCommitResponse = await fetch(newCommitUrl, {
+    method: "POST",
+    headers: {
+      "Accept": "application/vnd.github+json",
+      "Authorization": `Bearer ${token}`,
+      "User-Agent": "kumpeapps-deployment-bot",
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      message: input.message,
+      tree: newTreeSha,
+      parents: [currentCommitSha]
+    }),
+    signal: AbortSignal.timeout(15000)
+  });
+
+  if (!newCommitResponse.ok) {
+    const errorText = await newCommitResponse.text();
+    throw new Error(`Failed to create commit: HTTP ${newCommitResponse.status} - ${errorText}`);
+  }
+
+  const newCommitData = await newCommitResponse.json() as { sha: string };
+  const newCommitSha = newCommitData.sha;
+
+  // Update the branch reference
+  const updateRefResponse = await fetch(refUrl, {
+    method: "PATCH",
+    headers: {
+      "Accept": "application/vnd.github+json",
+      "Authorization": `Bearer ${token}`,
+      "User-Agent": "kumpeapps-deployment-bot",
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      sha: newCommitSha,
+      force: false
+    }),
+    signal: AbortSignal.timeout(15000)
+  });
+
+  if (!updateRefResponse.ok) {
+    const errorText = await updateRefResponse.text();
+    throw new Error(`Failed to update branch ref: HTTP ${updateRefResponse.status} - ${errorText}`);
+  }
+
+  await recordAuditEvent({
+    actorType: "system",
+    actorId: "github-automation",
+    action: "github.files.created_batch",
+    resourceType: "github_commit",
+    resourceId: newCommitSha,
+    payload: {
+      repositoryOwner: input.repositoryOwner,
+      repositoryName: input.repositoryName,
+      branch: input.branch,
+      filesCount: input.files.length,
+      message: input.message
+    }
+  });
+}
+
+/**
+ * Fetch file content from a GitHub repository
+ */
+export async function fetchFileFromGitHub(input: {
+  repositoryOwner: string;
+  repositoryName: string;
+  path: string;
+  ref?: string; // branch, tag, or commit SHA (defaults to default branch)
+}): Promise<string> {
+  const token = await getGitHubToken(input.repositoryOwner, input.repositoryName);
+  if (!token) {
+    throw new Error("No GitHub token available");
+  }
+
+  const url = `https://api.github.com/repos/${encodeURIComponent(input.repositoryOwner)}/${encodeURIComponent(input.repositoryName)}/contents/${encodeURIComponent(input.path)}${input.ref ? `?ref=${encodeURIComponent(input.ref)}` : ''}`;
+
+  const response = await fetch(url, {
+    headers: {
+      "Accept": "application/vnd.github+json",
+      "Authorization": `Bearer ${token}`,
+      "User-Agent": "kumpeapps-deployment-bot"
+    },
+    signal: AbortSignal.timeout(15000)
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`Failed to fetch file ${input.path}: HTTP ${response.status} - ${errorText}`);
+  }
+
+  const fileData = await response.json() as { content: string; encoding: string; type: string };
+  
+  if (fileData.type !== 'file') {
+    throw new Error(`Path ${input.path} is not a file`);
+  }
+
+  if (fileData.encoding !== 'base64') {
+    throw new Error(`Unexpected encoding: ${fileData.encoding}`);
+  }
+
+  // Decode base64 content
+  const content = Buffer.from(fileData.content, 'base64').toString('utf-8');
+
+  await recordAuditEvent({
+    actorType: "system",
+    actorId: "github-automation",
+    action: "github.file.fetched",
+    resourceType: "github_file",
+    resourceId: input.path,
+    payload: {
+      repositoryOwner: input.repositoryOwner,
+      repositoryName: input.repositoryName,
+      path: input.path,
+      ref: input.ref,
+      sizeBytes: content.length
+    }
+  });
+
+  return content;
 }
 
 /**
@@ -545,4 +837,144 @@ export async function linkIssueToBranch(input: {
       branchName: input.branchName
     }
   });
+}
+
+/**
+ * Add a collaborator to a repository
+ */
+export async function addRepositoryCollaborator(input: {
+  repositoryOwner: string;
+  repositoryName: string;
+  username: string;
+  permission?: "pull" | "push" | "admin" | "maintain" | "triage"; // defaults to push
+}): Promise<void> {
+  const token = await getGitHubToken(input.repositoryOwner, input.repositoryName);
+  if (!token) {
+    throw new Error("No GitHub token available");
+  }
+
+  const url = `https://api.github.com/repos/${encodeURIComponent(input.repositoryOwner)}/${encodeURIComponent(input.repositoryName)}/collaborators/${encodeURIComponent(input.username)}`;
+
+  const response = await fetch(url, {
+    method: "PUT",
+    headers: {
+      "Accept": "application/vnd.github+json",
+      "Authorization": `Bearer ${token}`,
+      "User-Agent": "kumpeapps-deployment-bot",
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      permission: input.permission ?? "push"
+    }),
+    signal: AbortSignal.timeout(15000)
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`Failed to add collaborator: HTTP ${response.status} - ${errorText}`);
+  }
+
+  await recordAuditEvent({
+    actorType: "system",
+    actorId: "github-automation",
+    action: "github.collaborator.added",
+    resourceType: "github_repository",
+    resourceId: `${input.repositoryOwner}/${input.repositoryName}`,
+    payload: {
+      repositoryOwner: input.repositoryOwner,
+      repositoryName: input.repositoryName,
+      username: input.username,
+      permission: input.permission ?? "push"
+    }
+  });
+}
+
+/**
+ * Accept a pending repository invitation for a user account
+ * Used to auto-accept collaborator invitations for the bot user account
+ */
+export async function acceptRepositoryInvitation(input: {
+  repositoryOwner: string;
+  repositoryName: string;
+}): Promise<boolean> {
+  const { BOT_USER_TOKEN } = appConfig;
+
+  if (!BOT_USER_TOKEN) {
+    console.warn("BOT_USER_TOKEN not configured - cannot auto-accept invitation");
+    return false;
+  }
+
+  try {
+    // List pending invitations for the user
+    const listUrl = "https://api.github.com/user/repository_invitations";
+    const listResponse = await fetch(listUrl, {
+      method: "GET",
+      headers: {
+        "Accept": "application/vnd.github+json",
+        "Authorization": `Bearer ${BOT_USER_TOKEN}`,
+        "User-Agent": "kumpeapps-deployment-bot"
+      },
+      signal: AbortSignal.timeout(15000)
+    });
+
+    if (!listResponse.ok) {
+      const errorText = await listResponse.text();
+      console.warn(`Failed to list invitations: HTTP ${listResponse.status} - ${errorText}`);
+      return false;
+    }
+
+    const invitations = await listResponse.json() as Array<{
+      id: number;
+      repository: {
+        full_name: string;
+        owner: { login: string };
+        name: string;
+      };
+    }>;
+
+    // Find the invitation for this specific repository
+    const repoFullName = `${input.repositoryOwner}/${input.repositoryName}`;
+    const invitation = invitations.find(inv => inv.repository.full_name === repoFullName);
+
+    if (!invitation) {
+      console.warn(`No pending invitation found for ${repoFullName}`);
+      return false;
+    }
+
+    // Accept the invitation
+    const acceptUrl = `https://api.github.com/user/repository_invitations/${invitation.id}`;
+    const acceptResponse = await fetch(acceptUrl, {
+      method: "PATCH",
+      headers: {
+        "Accept": "application/vnd.github+json",
+        "Authorization": `Bearer ${BOT_USER_TOKEN}`,
+        "User-Agent": "kumpeapps-deployment-bot"
+      },
+      signal: AbortSignal.timeout(15000)
+    });
+
+    if (!acceptResponse.ok) {
+      const errorText = await acceptResponse.text();
+      console.warn(`Failed to accept invitation: HTTP ${acceptResponse.status} - ${errorText}`);
+      return false;
+    }
+
+    await recordAuditEvent({
+      actorType: "system",
+      actorId: "github-automation",
+      action: "github.invitation.accepted",
+      resourceType: "github_repository",
+      resourceId: `${input.repositoryOwner}/${input.repositoryName}`,
+      payload: {
+        repositoryOwner: input.repositoryOwner,
+        repositoryName: input.repositoryName,
+        invitationId: invitation.id
+      }
+    });
+
+    return true;
+  } catch (error) {
+    console.warn(`Error accepting repository invitation:`, error);
+    return false;
+  }
 }

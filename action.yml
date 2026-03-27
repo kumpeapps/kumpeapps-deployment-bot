@@ -6,14 +6,6 @@ branding:
   color: 'blue'
 
 inputs:
-  environment:
-    description: 'Deployment environment (dev, stage, prod)'
-    required: false
-    default: 'dev'
-  config-path:
-    description: 'Path to deployment config (auto-detected if not provided)'
-    required: false
-    default: ''
   bot-url:
     description: 'Deployment bot URL'
     required: false
@@ -26,106 +18,11 @@ inputs:
 runs:
   using: 'composite'
   steps:
-    - name: Detect deployment config
-      id: config
-      shell: bash
-      run: |
-        CONFIG_PATH="${{ inputs.config-path }}"
-        
-        if [ -z "$CONFIG_PATH" ]; then
-          ENV="${{ inputs.environment }}"
-          SEARCH_DIR=".kumpeapps-deploy-bot/${ENV}"
-          
-          if [ -d "$SEARCH_DIR" ]; then
-            CONFIG_PATH=$(find "$SEARCH_DIR" -maxdepth 1 -type f \( -name "*.yml" -o -name "*.yaml" \) | head -n1)
-          fi
-          
-          if [ -z "$CONFIG_PATH" ]; then
-            echo "::error::No deployment config found in $SEARCH_DIR"
-            exit 1
-          fi
-        fi
-        
-        echo "config_path=$CONFIG_PATH" >> $GITHUB_OUTPUT
-        echo "::notice::Using deployment config: $CONFIG_PATH"
-    
-    - name: Extract secret names from config
-      id: secrets
-      shell: bash
-      run: |
-        CONFIG_FILE="${{ steps.config.outputs.config_path }}"
-        
-        if [ ! -f "$CONFIG_FILE" ]; then
-          echo "::error::Config file not found: $CONFIG_FILE"
-          exit 1
-        fi
-        
-        # Extract env_mappings and get secret names (right side of mapping)
-        SECRET_NAMES=$(grep -A 50 'env_mappings:' "$CONFIG_FILE" | \
-          grep -E '^\s+[A-Z0-9_]+:\s*[A-Z0-9_]+' | \
-          awk '{print $2}' | \
-          sort -u)
-        
-        if [ -z "$SECRET_NAMES" ]; then
-          echo "::warning::No env_mappings found in deployment config"
-          exit 0
-        fi
-        
-        # Convert to comma-separated for easier processing
-        SECRET_LIST=$(echo "$SECRET_NAMES" | tr '\n' ',')
-        echo "secret_names=$SECRET_LIST" >> $GITHUB_OUTPUT
-        echo "::notice::Found secrets in deployment config: $SECRET_LIST"
-    
-    - name: Validate required secrets are present
-      if: steps.secrets.outputs.secret_names != ''
-      shell: bash
-      env:
-        SECRET_NAMES: ${{ steps.secrets.outputs.secret_names }}
-      run: |
-        # Remove trailing comma
-        SECRET_NAMES="${SECRET_NAMES%,}"
-        
-        # Split by comma
-        IFS=',' read -ra SECRETS <<< "$SECRET_NAMES"
-        
-        MISSING=()
-        
-        for SECRET_NAME in "${SECRETS[@]}"; do
-          if [ -z "$SECRET_NAME" ]; then
-            continue
-          fi
-          
-          # Check if secret is in environment
-          SECRET_VALUE=""
-          eval "SECRET_VALUE=\${${SECRET_NAME}:-}"
-          
-          if [ -z "$SECRET_VALUE" ]; then
-            MISSING+=("$SECRET_NAME")
-          fi
-        done
-        
-        if [ ${#MISSING[@]} -gt 0 ]; then
-          echo "::error::Required secrets not passed as environment variables:"
-          for SECRET_NAME in "${MISSING[@]}"; do
-            echo "::error::  - $SECRET_NAME"
-          done
-          echo "::error::"
-          echo "::error::Add missing secrets to your workflow's env section:"
-          for SECRET_NAME in "${MISSING[@]}"; do
-            echo "::error::    ${SECRET_NAME}: (from GitHub secrets)"
-          done
-          exit 1
-        fi
-        
-        echo "::notice::All required secrets are present ✓"
-    
-    - name: Sync secrets to deployment bot
-      if: steps.secrets.outputs.secret_names != ''
+    - name: Sync all secrets to deployment bot
       shell: bash
       env:
         BOT_URL: ${{ inputs.bot-url }}
         BOT_TOKEN: ${{ inputs.bot-token }}
-        SECRET_NAMES: ${{ steps.secrets.outputs.secret_names }}
       run: |
         # Use provided token or fall back to standard secret name
         TOKEN="${BOT_TOKEN}"
@@ -142,35 +39,33 @@ runs:
         REPO_NAME="${GITHUB_REPOSITORY#*/}"
         
         echo "::group::Syncing secrets for $REPO_OWNER/$REPO_NAME"
-        echo "The action will sync only the secrets found in your deployment config's env_mappings."
-        echo "Secrets passed as env vars but not in your config will be skipped."
+        echo "The action will sync ALL secrets passed as environment variables."
         echo ""
         
-        # Remove trailing comma
-        SECRET_NAMES="${SECRET_NAMES%,}"
+        # Get all environment variables, excluding system/GitHub Actions variables
+        # We'll sync anything that looks like a secret (uppercase with underscores)
+        SECRET_NAMES=$(env | grep -E '^[A-Z][A-Z0-9_]*=' | cut -d= -f1 | grep -v -E '^(GITHUB_|RUNNER_|CI|PATH|HOME|USER|SHELL|PWD|OLDPWD|LANG|LC_|TERM|SHLVL|_|BOT_URL|BOT_TOKEN|ACTIONS_|AGENT_|ANDROID_|AZURE_|CHROME|CONDA|DEPLOYMENT_|DOTNET_|GOROOT|GRADLE_|GRAALVM_|HOMEBREW_|ImageOS|ImageVersion|INVOCATION_ID|JAVA_|JOURNAL_STREAM|LEIN_|NVM_|PERFLOG_|POWERSHELL_|SELENIUM_|SGX_|STATS_|SWIFT_|VCPKG_|INPUT_)')
         
-        # Split by comma
-        IFS=',' read -ra SECRETS <<< "$SECRET_NAMES"
+        if [ -z "$SECRET_NAMES" ]; then
+          echo "::warning::No secrets found in environment variables to sync"
+          echo "::warning::Make sure to pass your secrets in the env section of the action"
+          exit 0
+        fi
         
         SYNCED=0
-        SKIPPED=0
         FAILED=0
         
-        for SECRET_NAME in "${SECRETS[@]}"; do
-          # Skip empty
-          if [ -z "$SECRET_NAME" ]; then
+        for SECRET_NAME in $SECRET_NAMES; do
+          # Skip KUMPEAPPS_DEPLOY_BOT_TOKEN itself
+          if [ "$SECRET_NAME" = "KUMPEAPPS_DEPLOY_BOT_TOKEN" ]; then
             continue
           fi
           
-          # Get secret value from environment
-          # GitHub Actions doesn't allow dynamic secret access, so secrets must be
-          # explicitly passed as environment variables by the caller
+          # Get secret value
           SECRET_VALUE=""
           eval "SECRET_VALUE=\${${SECRET_NAME}:-}"
           
           if [ -z "$SECRET_VALUE" ]; then
-            echo "::debug::Secret ${SECRET_NAME} not provided in env - skipping"
-            SKIPPED=$((SKIPPED + 1))
             continue
           fi
           
@@ -203,12 +98,7 @@ runs:
         done
         
         echo "::endgroup::"
-        
-        if [ $SKIPPED -gt 0 ]; then
-          echo "::notice::Summary: ${SYNCED} synced successfully (${SKIPPED} were not in config and skipped)"
-        else
-          echo "::notice::Summary: ${SYNCED} secrets synced successfully ✅"
-        fi
+        echo "::notice::Summary: ${SYNCED} secrets synced successfully ✅"
         
         if [ $FAILED -gt 0 ]; then
           echo "::error::${FAILED} secrets failed to sync"

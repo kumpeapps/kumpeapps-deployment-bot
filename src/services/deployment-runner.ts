@@ -1,4 +1,6 @@
 import { createHash } from "node:crypto";
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 import { appConfig } from "../config.js";
 import { prisma } from "../db.js";
 import { recordAuditEvent } from "./audit.js";
@@ -12,6 +14,9 @@ import { ensureVirtualizorVm, resolvePlanDetails } from "./virtualizor.js";
 import { createGithubDeployment, updateGithubDeploymentStatus, waitForWorkflowsToComplete, reportDeploymentError, closeDeploymentErrorIssue } from "./github-status.js";
 import { recordDeploymentCompensationEvent } from "./deployment-compensation-health.js";
 import { buildVmHostname, checkVmApprovalStatus, createVmApprovalRequest } from "./vm-approval.js";
+import { getGitHubToken } from "./github-app-auth.js";
+import { syncAuthorizedAdminsToVm } from "./vm-user-management.js";
+import { fetchFileFromGitHub } from "./github-automation.js";
 
 /**
  * Custom error for VM approval pending state.
@@ -189,6 +194,120 @@ async function runCompensationPlan(input: {
     actions,
     errors
   };
+}
+
+/**
+ * Resolve file content - either inline or from a file reference
+ * 
+ * @param content - Either inline content (contains newlines) or a file path
+ * @param configPath - Path to the deployment config file (for resolving relative paths)
+ * @param repositoryOwner - Repository owner
+ * @param repositoryName - Repository name
+ * @param commitSha - Git commit SHA to fetch from
+ * @returns Resolved file content
+ */
+async function resolveFileContent(input: {
+  content: string;
+  configPath: string;
+  repositoryOwner: string;
+  repositoryName: string;
+  commitSha: string;
+}): Promise<string> {
+  const trimmed = input.content.trim();
+  
+  // Detect inline content: contains newlines or starts with version/services (docker-compose indicators)
+  const isInlineContent = 
+    trimmed.includes('\n') || 
+    trimmed.startsWith('version:') ||
+    trimmed.startsWith('services:') ||
+    trimmed.startsWith('name:');
+  
+  if (isInlineContent) {
+    return trimmed;
+  }
+  
+  // It's a file path - resolve it
+  let resolvedPath = trimmed;
+  
+  // Get the directory of the config file
+  const configDir = input.configPath.substring(0, input.configPath.lastIndexOf('/'));
+  
+  // Handle relative paths
+  if (resolvedPath.startsWith('./')) {
+    // Same directory as config
+    resolvedPath = `${configDir}/${resolvedPath.substring(2)}`;
+  } else if (resolvedPath.startsWith('../')) {
+    // Parent directory - resolve relative to config
+    const parts = configDir.split('/');
+    const upLevels = (resolvedPath.match(/\.\.\//g) || []).length;
+    const remainingPath = resolvedPath.replace(/^(\.\.\/)+/, '');
+    
+    if (upLevels >= parts.length) {
+      throw new Error(`Invalid path: ${resolvedPath} goes above repository root`);
+    }
+    
+    resolvedPath = `${parts.slice(0, parts.length - upLevels).join('/')}/${remainingPath}`;
+  } else if (!resolvedPath.startsWith('/') && !resolvedPath.includes('/')) {
+    // Just a filename - default to config directory
+    resolvedPath = `${configDir}/${resolvedPath}`;
+  } else if (resolvedPath.startsWith('/')) {
+    // Absolute path from repository root - remove leading slash
+    resolvedPath = resolvedPath.substring(1);
+  }
+  
+  // Normalize path (remove double slashes, etc.)
+  resolvedPath = resolvedPath.replace(/\/+/g, '/');
+  
+  // Fetch the file from GitHub
+  try {
+    const content = await fetchFileFromGitHub({
+      repositoryOwner: input.repositoryOwner,
+      repositoryName: input.repositoryName,
+      path: resolvedPath,
+      ref: input.commitSha
+    });
+    
+    return content;
+  } catch (error) {
+    throw new Error(`Failed to fetch file ${resolvedPath}: ${error instanceof Error ? error.message : 'unknown error'}`);
+  }
+}
+
+/**
+ * Injects Managed Nebula client service into docker-compose content.
+ * Replaces the first occurrence of "services:" with the template that includes
+ * the nebula client service plus "services:" to maintain structure.
+ * 
+ * Example transformation:
+ * Input:                          Output:
+ * version: '3.8'                  version: '3.8'
+ * services:                       services:
+ *   web:                            client:  # injected
+ *     image: myapp                    image: nebula-client
+ *                                   web:     # original services follow
+ *                                     image: myapp
+ */
+async function injectNebulaClient(dockerComposeContent: string): Promise<string> {
+  try {
+    // Read the nebula client template
+    const templatePath = join(process.cwd(), 'templates', 'mobile-nebula-docker-config.yml');
+    const nebulaTemplate = await readFile(templatePath, 'utf-8');
+    
+    // Replace the first occurrence of "services:" (on its own line) with the template
+    // The template already includes "services:" at the top, so this will inject
+    // the nebula client as the first service in the compose file
+    const injected = dockerComposeContent.replace(/^services:\s*$/m, nebulaTemplate.trim());
+    
+    if (injected === dockerComposeContent) {
+      // If no replacement occurred, the docker-compose file might not have
+      // a standard "services:" line - log a warning but continue
+      console.warn('[Deployment Runner] Warning: Could not inject Nebula client - "services:" not found on separate line');
+    }
+    
+    return injected;
+  } catch (error) {
+    throw new Error(`Failed to inject Nebula client: ${error instanceof Error ? error.message : 'unknown error'}`);
+  }
 }
 
 export async function executeDeployment(input: ExecuteDeploymentInput): Promise<{ deploymentId: number }> {
@@ -532,7 +651,53 @@ export async function executeDeployment(input: ExecuteDeploymentInput): Promise<
       await auditSecretMappings(deployment.id, input.config.env_mappings, resolvedSecrets.unresolved);
     });
 
+    // Sync authorized admins to VM if configured
+    if (input.config.authorized_admins && input.config.authorized_admins.length > 0) {
+      console.log(`[Deployment Runner] Syncing authorized admins to VM...`);
+      
+      await runStep(
+        deployment.id,
+        "vm.sync_authorized_admins",
+        async () => {
+          const githubToken = await getGitHubToken(input.repositoryOwner, input.repositoryName);
+          
+          if (!githubToken) {
+            throw new Error(
+              "GitHub App token is required for authorized_admins feature (needed to resolve smart groups like github.repo.collaborators, github.repo.admins, and github.org.*)"
+            );
+          }
+          
+          const result = await syncAuthorizedAdminsToVm({
+            repositoryOwner: input.repositoryOwner,
+            repositoryName: input.repositoryName,
+            vmIp: vmIp!,
+            authorizedAdmins: input.config.authorized_admins!,
+            githubToken,
+            sshUser: appConfig.VM_SSH_USER,
+            sshKeyPath: appConfig.VM_SSH_KEY_PATH,
+            sshPort: input.config.ssh_port ?? appConfig.VM_SSH_PORT,
+            dryRun: input.dryRun
+          });
+          
+          return result;
+        },
+        (result) => `Processed ${result.usersProcessed} users (created: ${result.usersCreated}, added to group: ${result.usersAddedToGroup}, removed from group: ${result.usersRemovedFromGroup})`
+      );
+    }
+
     console.log(`[Deployment Runner] Starting docker compose deployment to VM...`);
+
+    // Resolve docker-compose content (inline or file reference)
+    let dockerComposeContent = await resolveFileContent({
+      content: input.config.docker_compose,
+      configPath: input.configPath,
+      repositoryOwner: input.repositoryOwner,
+      repositoryName: input.repositoryName,
+      commitSha: input.commitSha
+    });
+
+    // Inject Managed Nebula client service
+    dockerComposeContent = await injectNebulaClient(dockerComposeContent);
 
     await runStep(
       deployment.id,
@@ -541,7 +706,7 @@ export async function executeDeployment(input: ExecuteDeploymentInput): Promise<
         return deployComposeToVm({
           vmHostname: input.config.vm_hostname,
           vmIp: vmIp!,
-          composeConfig: input.config.docker_compose,
+          composeConfig: dockerComposeContent,
           envValues: resolvedSecrets.envValues,
           dryRun: input.dryRun,
           sshUser: appConfig.VM_SSH_USER,
@@ -555,11 +720,13 @@ export async function executeDeployment(input: ExecuteDeploymentInput): Promise<
 
     vmComposeDeployed = true;
 
+    // Deploy Caddy config and capture the deployed file names
+    let deployedCaddyFiles: string[] = [];
     await runStep(
       deployment.id,
       "caddy.deploy_config",
       async () => {
-        // Replace placeholders in all Caddy config files
+        // Resolve and process all Caddy config files
         const processedCaddyConfig: Record<string, string> = {};
         
         // Get Nebula IP from secrets (environment-specific)
@@ -567,20 +734,27 @@ export async function executeDeployment(input: ExecuteDeploymentInput): Promise<
         const nebulaIp = resolvedSecrets.envValues[nebulaIpSecretName];
         
         for (const [fileName, content] of Object.entries(input.config.caddy)) {
-          let processed = content;
+          // Resolve file content first (inline or file reference)
+          let resolved = await resolveFileContent({
+            content,
+            configPath: input.configPath,
+            repositoryOwner: input.repositoryOwner,
+            repositoryName: input.repositoryName,
+            commitSha: input.commitSha
+          });
           
           // Replace VM IP placeholder
-          processed = processed.replace(/\{\{vm\.ip\}\}/g, vmIp!);
+          resolved = resolved.replace(/\{\{vm\.ip\}\}/g, vmIp!);
           
           // Replace Nebula IP placeholder (if Nebula IP is available)
           if (nebulaIp) {
-            processed = processed.replace(/\{\{nebula\.ip\}\}/g, nebulaIp);
+            resolved = resolved.replace(/\{\{nebula\.ip\}\}/g, nebulaIp);
           }
           
-          processedCaddyConfig[fileName] = processed;
+          processedCaddyConfig[fileName] = resolved;
         }
         
-        return deployCaddyConfig({
+        const result = await deployCaddyConfig({
           caddyHost: input.caddyHost,
           caddyConfig: processedCaddyConfig,
           domains: input.config.domains,
@@ -590,10 +764,16 @@ export async function executeDeployment(input: ExecuteDeploymentInput): Promise<
           sshPort: input.config.caddy_ssh_port ?? appConfig.CADDY_SSH_PORT,
           remoteConfigDir: appConfig.CADDY_CONFIG_DIR,
           validateCommand: appConfig.CADDY_VALIDATE_COMMAND,
-          reloadCommand: appConfig.CADDY_RELOAD_COMMAND
+          reloadCommand: appConfig.CADDY_RELOAD_COMMAND,
+          repositoryOwner: input.repositoryOwner,
+          repositoryName: input.repositoryName,
+          environment: input.environment
         });
+        
+        deployedCaddyFiles = result.deployedFiles;
+        return result;
       },
-      (stdout) => stdout
+      (result) => result.message
     );
 
     await runStep(deployment.id, "caddy.persist_release", async () => {
@@ -602,7 +782,8 @@ export async function executeDeployment(input: ExecuteDeploymentInput): Promise<
           deploymentId: deployment.id,
           caddyHost: input.caddyHost,
           configChecksum: createHash("sha256").update(JSON.stringify(input.config.caddy)).digest("hex"),
-          reloadStatus: "success"
+          reloadStatus: "success",
+          deployedFiles: deployedCaddyFiles
         }
       });
     });

@@ -1,0 +1,76 @@
+# Staging Environment Config Example
+# File location: .kumpeapps-deploy-bot/stage/myapp.yml
+
+deployment_type: docker
+assigned_username: your-github-username
+vm_hostname: stage-vm-myapp
+
+# Optional: VM user management
+# Users will be created on the VM and added to bot-admin group
+authorized_admins:
+  - github.repo.admins
+  - github.org.kumpeapps.team.vm_admins
+
+# Domains for reverse proxy
+domains:
+  - example.stage.kumpe.app
+
+# Docker Compose - reference file in same directory
+# Note: Managed Nebula VPN client is automatically injected as the first service
+# You don't need to include it in your docker-compose.yml
+docker_compose: docker-compose.yml
+
+# Inline example:
+# docker_compose: |
+#   version: '3.8'
+#   services:
+#     web:
+#       image: myapp:stage
+#       ports:
+#         - "8080:8080"
+#       environment:
+#         NODE_ENV: staging
+#         LOG_LEVEL: info
+
+# Caddy configuration - reference file or inline
+# Files are deployed with unique names: {owner}-{env}-{repo}-{fileName}
+# Files without extensions get .caddy added automatically
+# Example: 'main: caddyfile' -> 'kumpeapps-stage-myapp-main.caddy'
+caddy:
+  main: caddyfile
+
+# Inline example:
+# caddy:
+#   main: |
+#     myapp-stage.example.com, staging.myapp.example.com {
+#       import cloudns_dns
+#       import force_https
+#       reverse_proxy {{nebula.ip}}:8080
+#       log {
+#         output file /var/log/caddy/myapp-stage.log
+#       }
+#     }
+
+# Environment variable mappings
+# Map container env vars to GitHub repository secrets
+env_mappings:
+  NEBULA_CLIENT_TOKEN: STAGE_NEBULA_CLIENT_TOKEN  # Required for automatic VPN client injection
+
+# Deployment rules for staging environment
+#
+# Deploys automatically when code is pushed to main branch
+# No label required - every push to main triggers staging deployment
+deploy_rules:
+  - environment: stage
+    branches:
+      include:
+        - main
+
+# Alternative: Require manual approval via label
+# deploy_rules:
+#   - environment: stage
+#     labels:
+#       - deploy-stage
+#     branches:
+#       include:
+#         - main

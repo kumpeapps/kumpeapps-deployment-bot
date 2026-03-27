@@ -8,6 +8,8 @@
  * 4. Creates setup branch and PR with sync-secrets workflow
  */
 
+import { readFile } from "fs/promises";
+import { join } from "path";
 import { appConfig } from "../config.js";
 import { recordAuditEvent } from "./audit.js";
 import { provisionNebulaClients } from "./nebula-provisioning.js";
@@ -18,6 +20,7 @@ import {
   createGitHubBranch,
   createOrUpdateGitHubFile,
   createGitHubPullRequest,
+  createMultipleFilesInSingleCommit,
   linkIssueToBranch
 } from "./github-automation.js";
 import { generateSyncSecretsWorkflow } from "./workflow-generator.js";
@@ -63,6 +66,7 @@ This issue tracks the automated initialization of the deployment bot for this re
 - [ ] Provision Nebula VPN clients
 - [ ] Push secrets to GitHub
 - [ ] Create sync-secrets workflow
+- [ ] Create deployment config templates
 - [ ] Submit pull request for review
 
 **Note:** This process is fully automated. Please review the pull request when it's ready.`;
@@ -150,6 +154,29 @@ Proceeding with workflow setup...`;
 }
 
 /**
+ * Read environment-specific config templates from files
+ */
+async function loadEnvironmentTemplates(): Promise<{
+  dev: string;
+  stage: string;
+  prod: string;
+  gitleaks: string;
+  gitleaksignore: string;
+}> {
+  const templatesDir = join(process.cwd(), "templates");
+  
+  const [dev, stage, prod, gitleaks, gitleaksignore] = await Promise.all([
+    readFile(join(templatesDir, "dev-example.yml.template"), "utf-8"),
+    readFile(join(templatesDir, "stage-example.yml.template"), "utf-8"),
+    readFile(join(templatesDir, "prod-example.yml.template"), "utf-8"),
+    readFile(join(templatesDir, "gitleaks.toml.template"), "utf-8"),
+    readFile(join(templatesDir, "gitleaksignore.template"), "utf-8")
+  ]);
+  
+  return { dev, stage, prod, gitleaks, gitleaksignore };
+}
+
+/**
  * Template: Pull request body
  */
 function getInitializationPrBody(params: {
@@ -169,11 +196,16 @@ function getInitializationPrBody(params: {
 
   return `## 🤖 Automated Deployment Bot Setup
 
-This PR adds the required GitHub Actions workflow for secret synchronization.
+This PR adds the required GitHub Actions workflow and deployment configuration templates.
 
 ### What's included
 
-- \`.github/workflows/sync-secrets.yml\` - Workflow to sync secrets to your VMs
+- \`.github/workflows/sync-secrets.yml\` - Workflow to sync secrets to the bot
+- \`.kumpeapps-deploy-bot/dev/dev-example.yml.template\` - Dev environment example (label-based PR deployment)
+- \`.kumpeapps-deploy-bot/stage/stage-example.yml.template\` - Stage environment example (main branch deployment)
+- \`.kumpeapps-deploy-bot/prod/prod-example.yml.template\` - Prod environment example (release-based deployment)
+- \`.gitleaks.toml\` - Secret scanner configuration to prevent false positives
+- \`.gitleaksignore\` - Ignore list for template files
 
 ### What's been set up
 
@@ -182,9 +214,21 @@ ${nebulaWhatIncluded}
 
 ### Next steps
 
-1. **Review this PR** - Check the workflow configuration
-2. **Merge this PR** - This activates the sync-secrets workflow
-3. **Configure deployments** - Add your deployment configs in \`.kumpeapps-deploy-bot/\` directory
+1. **Review this PR** - Check the workflow and template configurations
+2. **Merge this PR** - This activates the sync-secrets workflow and creates the folder structure
+3. **Configure deployments** - Copy and customize the template files:
+   \`\`\`bash
+   # Example: Create dev environment config
+   cp .kumpeapps-deploy-bot/dev/dev-example.yml.template .kumpeapps-deploy-bot/dev/myapp.yml
+   \`\`\`
+   Then customize with your actual values:
+   - Update \`assigned_username\`, \`vm_hostname\`, and \`domains\`
+   - Customize \`authorized_admins\` if using VM user management
+   - Add your \`docker_compose\` file or inline content
+   - Configure \`caddy\` reverse proxy settings
+   - Add environment variable mappings in \`env_mappings\`
+   - Adjust \`deploy_rules\` for your workflow (labels/branches/releases)
+4. **Sync secrets** - Run the sync-secrets workflow to push your secrets to the bot
 
 ### Secrets available in workflows
 
@@ -221,9 +265,10 @@ async function createInitializationIssue(input: {
   const issue = await createGitHubIssue({
     repositoryOwner: input.repositoryOwner,
     repositoryName: input.repositoryName,
-    title: "[task] KumpeApps Deployment BOT Initialization",
+    title: "[task] KumpeApps Deployment Bot Initialization",
     body: getInitializationIssueBody(),
-    labels: ["bot", "task"]
+    labels: ["bot", "task"],
+    assignees: ["kumpeapps-bot-deploy"]
   });
 
   await addGitHubComment({
@@ -288,7 +333,7 @@ async function setupSyncSecretsWorkflowBranch(params: {
   repositoryName: string;
   issue: Issue;
 }): Promise<{ branchName: string; pr: PullRequest }> {
-  const branchName = `task/${params.issue.number}`;
+  const branchName = `task/#${params.issue.number}`;
 
   // Create branch
   await createGitHubBranch({
@@ -309,15 +354,44 @@ async function setupSyncSecretsWorkflowBranch(params: {
     console.warn(`Failed to link branch to issue: ${error}`);
   }
 
-  // Generate and commit workflow file
+  // Prepare all files to be committed in a single commit
   const workflowContent = generateSyncSecretsWorkflow(appConfig.MANAGED_NEBULA_ENABLED);
-  await createOrUpdateGitHubFile({
+  const templates = await loadEnvironmentTemplates();
+
+  const files = [
+    {
+      path: ".github/workflows/sync-secrets.yml",
+      content: workflowContent
+    },
+    {
+      path: ".kumpeapps-deploy-bot/dev/dev-example.yml.template",
+      content: templates.dev
+    },
+    {
+      path: ".kumpeapps-deploy-bot/stage/stage-example.yml.template",
+      content: templates.stage
+    },
+    {
+      path: ".kumpeapps-deploy-bot/prod/prod-example.yml.template",
+      content: templates.prod
+    },
+    {
+      path: ".gitleaks.toml",
+      content: templates.gitleaks
+    },
+    {
+      path: ".gitleaksignore",
+      content: templates.gitleaksignore
+    }
+  ];
+
+  // Create all files in a single commit
+  await createMultipleFilesInSingleCommit({
     repositoryOwner: params.repositoryOwner,
     repositoryName: params.repositoryName,
-    path: ".github/workflows/sync-secrets.yml",
-    content: workflowContent,
-    message: "chore: add sync-secrets workflow for deployment bot",
-    branch: branchName
+    branch: branchName,
+    files,
+    message: `[${branchName}] chore: initialize deployment bot configuration`
   });
 
   // Create pull request
@@ -329,7 +403,8 @@ async function setupSyncSecretsWorkflowBranch(params: {
       issueNumber: params.issue.number,
       nebulaEnabled: appConfig.MANAGED_NEBULA_ENABLED
     }),
-    head: branchName
+    head: branchName,
+    assignees: ["kumpeapps-bot-deploy"]
   });
 
   return { branchName, pr };

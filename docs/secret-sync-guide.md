@@ -45,7 +45,7 @@ jobs:
       - uses: kumpeapps/kumpeapps-deployment-bot@v1
         env:
           KUMPEAPPS_DEPLOY_BOT_TOKEN: ${{ secrets.KUMPEAPPS_DEPLOY_BOT_TOKEN }}
-          # List ALL secrets from your env_mappings here:
+          # Pass all your secrets - they'll all be synced:
           DB_PASSWORD_SECRET: ${{ secrets.DB_PASSWORD_SECRET }}
 ```
 
@@ -53,26 +53,24 @@ See [docs/examples/repo-sync-secrets-simple.yml](./examples/repo-sync-secrets-si
 
 ### Understanding Secret Listing
 
-**Q: Why do I need to list secrets in the workflow if the action reads the config?**
+**Q: Why do I need to list secrets in the workflow?**
 
-GitHub Actions security prevents dynamic secret access (`${{ secrets[varName] }}`). However, **the action is smart:**
+GitHub Actions security prevents dynamic secret access (`${{ secrets[varName] }}`). **The action syncs everything you pass:**
 
-- 📖 Reads your deployment config automatically
-- ✓ Validates required secrets are present
-- 📤 Only syncs secrets in your `env_mappings`
-- ⚠️ Warns if required secrets are missing
-- ⏭️ Skips secrets not in your config
+- 📤 Syncs ALL secrets passed as environment variables
+- 🎯 No config parsing - simple and predictable
+- 🔧 Each deployment config uses what it needs via `env_mappings`
 
-**You only need to list secrets once** in the workflow. The action then:
-1. Checks your deployment config's `env_mappings`
-2. Verifies each required secret is passed as an env var
-3. Syncs only the secrets your config needs
-4. Skips any extra secrets you passed
+**You list all your secrets once** in the workflow, and:
+1. Action syncs all of them to the bot's database
+2. Each deployment config specifies which secrets it needs in `env_mappings`
+3. Bot injects only the secrets specified in that config's `env_mappings`
 
 **Example:**
-- Your config has `env_mappings: { DB_PASS: DB_SECRET }`
-- You pass `DB_SECRET` and `API_KEY` in the workflow
-- Action syncs `DB_SECRET` (needed) and skips `API_KEY` (not needed)
+- You pass `DB_SECRET`, `API_SECRET`, and `NEBULA_TOKEN` in the workflow
+- All three are synced to the bot
+- Dev config has `env_mappings: { DB_PASS: DB_SECRET }` → gets only DB_SECRET
+- Prod config has `env_mappings: { DB_PASS: DB_SECRET, API_KEY: API_SECRET }` → gets both
 
 ### Step 3: Run the Workflow
 
