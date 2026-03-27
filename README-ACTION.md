@@ -4,7 +4,7 @@ Automatically sync repository secrets from GitHub to the KumpeApps deployment bo
 
 ## Features
 
-- 📤 **Sync all secrets** - syncs everything you pass as environment variables
+- 🔑 **Sync all passed secrets** from workflow env variables
 - 🚀 **Simple setup** - just use the action, token is auto-provisioned
 - 🔒 **Secure** - uses per-repository API tokens, not admin tokens
 - 📝 **Audit trail** - all secret operations are logged
@@ -38,8 +38,7 @@ jobs:
       - uses: kumpeapps/kumpeapps-deployment-bot@v1
         env:
           KUMPEAPPS_DEPLOY_BOT_TOKEN: ${{ secrets.KUMPEAPPS_DEPLOY_BOT_TOKEN }}
-          # Pass all your secrets - they'll all be synced to the bot.
-          # Each deployment config uses only the secrets it needs.
+          # Pass all your secrets here - the action syncs everything provided
           DB_PASSWORD_SECRET: ${{ secrets.DB_PASSWORD_SECRET }}
           # Add your other secrets here
 ```
@@ -57,10 +56,10 @@ Go to Actions → Sync Secrets → Run workflow
    - Token only works for that specific repository (not admin access)
    - Provisioning runs at startup and hourly for resilience
 
-2. **Secret Sync** (all secrets):
-   - Action syncs ALL secrets passed as environment variables
-   - No config parsing - syncs everything you pass
-   - Simple and predictable behavior
+2. **Secret Sync** (automatic):
+  - Action reads all passed environment variables
+  - Filters out system/GitHub runtime variables
+  - Syncs remaining values as repository secrets in the bot
 
 3. **Deployment** (automatic):
    - Bot reads each deployment config's `env_mappings`
@@ -69,10 +68,14 @@ Go to Actions → Sync Secrets → Run workflow
 
 **Why do I need to list secrets in the workflow?**
 
+<<<<<<< HEAD
 GitHub Actions security prevents dynamic secret access (e.g., `${{ secrets[varName] }}`). The action syncs everything you pass:
 - 📤 Syncs ALL secrets passed as environment variables
 - 🎯 Each deployment config uses what it needs via `env_mappings`
 - 🔄 One workflow serves all environments
+=======
+GitHub Actions security prevents dynamic secret access (e.g., `${{ secrets[varName] }}`). The action syncs whatever secrets you explicitly pass in `env`.
+>>>>>>> 33daf68 ([bug/#16] Fixed Sync Secrets logic)
 
 ## Configuration
 
@@ -87,30 +90,19 @@ GitHub Actions security prevents dynamic secret access (e.g., `${{ secrets[varNa
 
 ```yaml
 jobs:
-  sync-secrets:
+  sync:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: kumpeapps/kumpeapps-deployment-bot@v1
         env:
           KUMPEAPPS_DEPLOY_BOT_TOKEN: ${{ secrets.KUMPEAPPS_DEPLOY_BOT_TOKEN }}
-          # Pass all your secrets - they'll all be synced
+          # Pass all your secrets - the action syncs everything provided
           DEV_DEPLOY_BOT_TOKEN: ${{ secrets.DEV_DEPLOY_BOT_TOKEN }}
           DEV_NEBULA_CLIENT_TOKEN: ${{ secrets.DEV_NEBULA_CLIENT_TOKEN }}
           PROD_DEPLOY_BOT_TOKEN: ${{ secrets.PROD_DEPLOY_BOT_TOKEN }}
           PROD_NEBULA_CLIENT_TOKEN: ${{ secrets.PROD_NEBULA_CLIENT_TOKEN }}
           DB_PASSWORD_SECRET: ${{ secrets.DB_PASSWORD_DEV }}
-  
-  sync-prod:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: kumpeapps/kumpeapps-deployment-bot@v1
-        with:
-          environment: prod
-        env:
-          KUMPEAPPS_DEPLOY_BOT_TOKEN: ${{ secrets.KUMPEAPPS_DEPLOY_BOT_TOKEN }}
-          DB_PASSWORD_SECRET: ${{ secrets.DB_PASSWORD_PROD }}
 ```
 
 ## Important Notes
@@ -119,14 +111,7 @@ jobs:
 
 Due to GitHub Actions security, you **must pass secrets as environment variables** in the workflow. The action cannot dynamically access `${{ secrets[varName] }}`.
 
-**However, the action is smart:**
-- 📖 Automatically reads your deployment config
-- ✓ Validates that required secrets are present
-- 📤 Only syncs secrets that are in your `env_mappings`
-- ⚠️ Warns if a required secret is missing
-- ⏭️ Skips secrets not needed by your config
-
-**Best practice:** List all your secrets in the workflow once, and the action handles the rest based on your deployment config.
+**Best practice:** Pass only the secrets you want stored for that repository.
 
 ### Token Security
 
@@ -139,7 +124,6 @@ Due to GitHub Actions security, you **must pass secrets as environment variables
 
 Sync secrets when:
 - ✅ Adding/updating secrets in GitHub
-- ✅ Changing `env_mappings` in deployment config
 - ✅ First-time repository setup
 
 You don't need to sync before every deployment - secrets are cached in the bot's database.
@@ -153,18 +137,16 @@ The `KUMPEAPPS_DEPLOY_BOT_TOKEN` secret hasn't been created. This should happen 
 2. Check repository Settings → Secrets → Actions for the token
 3. Check bot logs for token provisioning errors
 
-### "Secret XYZ not found"
+### "No secrets found in environment variables to sync"
 
-The action detected that your deployment config's `env_mappings` requires secret `XYZ`, but it wasn't passed as an environment variable.
+No custom secrets were passed in your workflow `env` block.
 
-**Fix:** Add it to your workflow's `env` section:
+**Fix:** Add secrets explicitly:
 ```yaml
 env:
   KUMPEAPPS_DEPLOY_BOT_TOKEN: ${{ secrets.KUMPEAPPS_DEPLOY_BOT_TOKEN }}
-  XYZ: ${{ secrets.XYZ }}  # Add this line
+  XYZ: ${{ secrets.XYZ }}
 ```
-
-The action automatically reads your deployment config to determine which secrets are needed, then validates they're all present.
 
 ### "Failed to sync secret (HTTP 401)"
 

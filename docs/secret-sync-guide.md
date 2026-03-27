@@ -55,22 +55,10 @@ See [docs/examples/repo-sync-secrets-simple.yml](./examples/repo-sync-secrets-si
 
 **Q: Why do I need to list secrets in the workflow?**
 
-GitHub Actions security prevents dynamic secret access (`${{ secrets[varName] }}`). **The action syncs everything you pass:**
+GitHub Actions security prevents dynamic secret access (`${{ secrets[varName] }}`).
+The action syncs the secrets you explicitly pass in the workflow `env` block.
 
-- 📤 Syncs ALL secrets passed as environment variables
-- 🎯 No config parsing - simple and predictable
-- 🔧 Each deployment config uses what it needs via `env_mappings`
-
-**You list all your secrets once** in the workflow, and:
-1. Action syncs all of them to the bot's database
-2. Each deployment config specifies which secrets it needs in `env_mappings`
-3. Bot injects only the secrets specified in that config's `env_mappings`
-
-**Example:**
-- You pass `DB_SECRET`, `API_SECRET`, and `NEBULA_TOKEN` in the workflow
-- All three are synced to the bot
-- Dev config has `env_mappings: { DB_PASS: DB_SECRET }` → gets only DB_SECRET
-- Prod config has `env_mappings: { DB_PASS: DB_SECRET, API_KEY: API_SECRET }` → gets both
+**You only need to list secrets once** in the workflow, and those values are synced to the bot.
 
 ### Step 3: Run the Workflow
 
