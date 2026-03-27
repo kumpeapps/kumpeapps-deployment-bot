@@ -1,0 +1,2 @@
+-- AlterTable
+ALTER TABLE `caddy_releases` ADD COLUMN `deployed_files` JSON NOT NULL;

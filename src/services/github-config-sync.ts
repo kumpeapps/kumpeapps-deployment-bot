@@ -57,6 +57,26 @@ function environmentFromPath(path: string): "dev" | "stage" | "prod" | null {
   return null;
 }
 
+function isTemplateConfigPath(path: string): boolean {
+  const lowerPath = path.toLowerCase();
+
+  // Ignore the new template naming pattern and any legacy template/example files.
+  if (lowerPath.endsWith(".template") || lowerPath.endsWith(".template.yml") || lowerPath.endsWith(".template.yaml")) {
+    return true;
+  }
+
+  const fileName = lowerPath.split("/").pop() ?? "";
+  if (fileName === "template.yml" || fileName === "template.yaml") {
+    return true;
+  }
+
+  if (fileName.includes("example")) {
+    return true;
+  }
+
+  return false;
+}
+
 export async function syncRepositoryDeploymentConfigs(input: {
   repositoryOwner: string;
   repositoryName: string;
@@ -88,6 +108,10 @@ export async function syncRepositoryDeploymentConfigs(input: {
     }
 
     if (!entry.path.startsWith(".kumpeapps-deploy-bot/")) {
+      return false;
+    }
+
+    if (isTemplateConfigPath(entry.path)) {
       return false;
     }
 

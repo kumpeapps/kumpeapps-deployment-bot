@@ -1,0 +1,93 @@
+# Development Environment Config Example
+# File location: .kumpeapps-deploy-bot/dev/myapp.yml
+
+deployment_type: docker
+assigned_username: your-github-username
+vm_hostname: dev-vm-myapp
+
+# Optional: VM user management
+# Users will be created on the VM and added to bot-admin group
+authorized_admins:
+  - github.repo.admins
+  - github.org.kumpeapps.team.vm_admins
+
+# Domains for reverse proxy
+domains:
+  - example.dev.kumpe.app
+
+# Docker Compose - reference file in same directory
+# Note: Managed Nebula VPN client is automatically injected as the first service
+# You don't need to include it in your docker-compose.yml
+docker_compose: docker-compose.yml
+
+# Inline example:
+# docker_compose: |
+#   version: '3.8'
+#   services:
+#     web:
+#       image: myapp:dev
+#       ports:
+#         - "8080:8080"
+#       environment:
+#         NODE_ENV: development
+#         LOG_LEVEL: debug
+
+# Caddy configuration - reference file or inline
+# Files are deployed with unique names: {owner}-{env}-{repo}-{fileName}
+# Files without extensions get .caddy added automatically
+# Example: 'main: caddyfile' → 'kumpeapps-dev-myapp-main.caddy'
+caddy:
+  main: caddyfile
+
+# Inline example:
+# caddy:
+#   main: |
+#     myapp-dev.example.com {
+#       import cloudns_dns
+#       import force_https
+#       reverse_proxy {{nebula.ip}}:8080
+#       log {
+#         output file /var/log/caddy/myapp-dev.log
+#       }
+#     }
+
+# Environment variable mappings
+# Map container env vars to GitHub repository secrets
+env_mappings:
+  NEBULA_CLIENT_TOKEN: DEV_NEBULA_CLIENT_TOKEN  # Required for automatic VPN client injection
+
+# Deployment rules for dev environment
+# 
+# Label-based deployment for PRs:
+#   - Add "deploy-dev" label to any PR to enable deployment
+#   - Every push to that PR triggers deployment automatically
+#   - Bot removes "deploy-dev" from other PRs (only one PR deployed at a time)
+#   - Works with ANY branch - no branch restrictions
+deploy_rules:
+  - environment: dev
+    labels:
+      - deploy-dev
+
+# Optional: Add branch filtering to label-based deployment
+# deploy_rules:
+#   - environment: dev
+#     labels:
+#       - deploy-dev
+#     branches:
+#       include:
+#         - feature/**
+#         - develop
+#       exclude:
+#         - main
+#         - release/**
+
+# Alternative: Deploy all pushes to matching branches (no label required)
+# deploy_rules:
+#   - environment: dev
+#     branches:
+#       include:
+#         - develop
+#         - dev
+#         - feature/**
+#       exclude:
+#         - main

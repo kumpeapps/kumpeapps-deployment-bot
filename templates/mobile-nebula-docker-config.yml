@@ -1,0 +1,20 @@
+services:
+  nebula_client:
+    image: ghcr.io/kumpeapps/managed-nebula/client:kumpeapps
+    restart: unless-stopped
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun
+    environment:
+      SERVER_URL: https://nebula.kumpedns.us:4200/api
+      CLIENT_TOKEN: ${NEBULA_CLIENT_TOKEN}
+      POLL_INTERVAL_HOURS: 1
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
+    volumes:
+      - ./nebula-config:/etc/nebula
+      - ./nebula-data:/var/lib/nebula
+      - /etc/timezone:/etc/timezone:ro
+    network_mode: host

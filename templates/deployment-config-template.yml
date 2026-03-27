@@ -1,0 +1,136 @@
+# KumpeApps Deployment Bot Configuration Template
+# 
+# This file is deployed as template.yml.example to prevent workflows from validating it.
+# 
+# To use this template:
+# 1. Copy it to your config name:
+#    cp .kumpeapps-deploy-bot/dev/template.yml.example .kumpeapps-deploy-bot/dev/your-app.yml
+# 
+# 2. Replace placeholders with your actual values:
+#    - {{USERNAME}} - Your GitHub username
+#    - {{VM_HOSTNAME}} - Target VM hostname (e.g., prod-vm-01)
+#    - {{APP_NAME}} - Your application name
+#    - {{DOMAIN}} - Your domain (e.g., myapp.example.com)
+
+# Deployment type (currently only 'docker' is supported)
+deployment_type: docker
+
+# GitHub username of the person assigned to manage this deployment
+assigned_username: "{{USERNAME}}"
+
+# Optional: List of users who should have admin access to the VM (members of bot-admin group)
+# Supports:
+#  - Individual GitHub usernames: username1, username2
+#  - Smart groups:
+#    - github.repo.collaborators (all repository collaborators)
+#    - github.repo.admins (only repository admins)
+#    - github.org.team.TEAM_SLUG (team in repo owner's org)
+#    - github.org.ORG_NAME.team.TEAM_SLUG (team in specified org)
+# 
+# Note: If a smart group fails (e.g., permission denied), it will be skipped with a warning
+#       and other groups will continue to be processed.
+# 
+# Users will be created with random passwords if they don't exist
+# authorized_admins:
+#   - github.repo.admins
+#   - github.org.team.devops
+#   - github.org.external-org.team.platform-team
+#   - additional-user
+
+authorized_admins:
+  - github.org.kumpeapps.team.vm_admins
+  - github.repo.admins
+
+# Target VM hostname where the application will be deployed
+vm_hostname: "{{VM_HOSTNAME}}"
+
+# Optional: Virtualizor plan name (if VM approval workflow is enabled)
+# plan_name: standard-plan
+
+# List of domains this application will serve
+domains:
+  - "{{DOMAIN}}"
+
+# Docker Compose configuration
+# Option 1: Reference a file (recommended)
+# Paths are relative to this config file's directory:
+#   - docker-compose.yml           (same directory as this file)
+#   - ./docker-compose.yml         (same directory, explicit)
+#   - ../docker-compose.yml        (parent directory)
+#   - /path/from/repo/root.yml     (absolute from repository root)
+# 
+# Note: Managed Nebula VPN client is automatically injected as the first service
+# You don't need to include the nebula client in your docker-compose.yml
+docker_compose: docker-compose.yml
+
+# Option 2: Inline content (backwards compatibility)
+# docker_compose: |
+#   version: '3.8'
+#   services:
+#     web:
+#       image: {{APP_NAME}}:latest
+#       ports:
+#         - "8080:8080"
+#       environment:
+#         - DATABASE_URL=${DATABASE_URL}
+
+# Caddy reverse proxy configuration
+# Keys are arbitrary labels for organizing your configs
+# Values can be file references or inline Caddyfile blocks
+#
+# File reference example (recommended):
+# caddy:
+#   main: caddy
+#   api: api.caddy
+#
+# Inline example (backwards compatibility):
+# caddy:
+#   main: |
+#     {{DOMAIN}} {
+#       reverse_proxy {{nebula.ip}}:8080
+#     }
+
+caddy:
+  main: main.caddy
+
+# Environment variable mappings: ENV_VAR_NAME: GITHUB_SECRET_NAME
+# These secrets should be synced via the sync-secrets workflow
+env_mappings: {}
+  # Example: Map DATABASE_URL env var to DB_CONNECTION_STRING secret
+  # DATABASE_URL: DB_CONNECTION_STRING
+  # API_KEY: API_SECRET_KEY
+
+# Deployment rules: when to deploy based on git branches
+# Note: This config file's environment is determined by its folder location:
+#   .kumpeapps-deploy-bot/dev/    → dev environment
+#   .kumpeapps-deploy-bot/stage/  → stage environment
+#   .kumpeapps-deploy-bot/prod/   → prod environment
+#
+# Only define rules for this config's environment.
+# Example for dev environment:
+deploy_rules:
+  - environment: dev
+    branches:
+      include:
+        - dev
+        - feature/**
+      exclude: []
+
+# Example for stage environment:
+# deploy_rules:
+#   - environment: stage
+#     branches:
+#       include:
+#         - main
+#         - release/**
+#       exclude: []
+
+# Example for prod environment:
+# deploy_rules:
+#   - environment: prod
+#     branches:
+#       include:
+#         - main
+#       exclude:
+#         - feature/**
+#         - develop

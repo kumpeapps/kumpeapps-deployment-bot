@@ -1,0 +1,89 @@
+# Production Environment Config Example
+# File location: .kumpeapps-deploy-bot/prod/myapp.yml
+
+deployment_type: docker
+assigned_username: your-github-username
+vm_hostname: prod-vm-myapp
+
+# Optional: VM user management
+# Users will be created on the VM and added to bot-admin group
+authorized_admins:
+  - github.repo.admins
+  - github.org.kumpeapps.team.vm_admins
+  - specific-admin-username
+
+# Domains for reverse proxy
+domains:
+  - example.kumpe.app
+
+# Docker Compose - reference file in same directory
+# Note: Managed Nebula VPN client is automatically injected as the first service
+# You don't need to include it in your docker-compose.yml
+docker_compose: docker-compose.yml
+
+# Inline example:
+# docker_compose: |
+#   version: '3.8'
+#   services:
+#     web:
+#       image: myapp:latest
+#       ports:
+#         - "8080:8080"
+#       environment:
+#         NODE_ENV: production
+#         LOG_LEVEL: warn
+#       restart: unless-stopped
+
+# Caddy configuration - reference file or inline
+# Files are deployed with unique names: {owner}-{env}-{repo}-{fileName}
+# Files without extensions get .caddy added automatically
+# Example: 'main: caddyfile' → 'kumpeapps-prod-myapp-main.caddy'
+caddy:
+  main: caddyfile
+
+# Inline example:
+# caddy:
+#   main: |
+#     myapp.example.com, www.myapp.example.com {
+#       import cloudns_dns
+#       import force_https
+#       reverse_proxy {{nebula.ip}}:8080
+#       log {
+#         output file /var/log/caddy/myapp-prod.log
+#       }
+#     }
+
+# Environment variable mappings
+# Map container env vars to GitHub repository secrets
+env_mappings:
+  NEBULA_CLIENT_TOKEN: PROD_NEBULA_CLIENT_TOKEN  # Required for automatic VPN client injection
+
+# Deployment rules for production environment
+# 
+# OPTION 1: Deploy on GitHub releases (not pre-releases)
+# When you create a release, deployment is triggered automatically
+# Pre-releases are ignored for production safety
+deploy_rules:
+  - environment: prod
+    release:
+      types:
+        - published
+      exclude_prerelease: true
+
+# OPTION 2: Deploy on tags matching semantic versioning
+# deploy_rules:
+#   - environment: prod
+#     branches:
+#       include:
+#         - v*.*.*
+#         - release-*
+
+# OPTION 3: Deploy main with manual approval label
+# deploy_rules:
+#   - environment: prod
+#     labels:
+#       - deploy-prod
+#       - emergency-hotfix
+#     branches:
+#       include:
+#         - main

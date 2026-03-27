@@ -21,7 +21,7 @@ interface NebulaClientCreateRequest {
   is_lighthouse: boolean;
   group_ids: number[];
   pool_id: number;
-  ip_group_pool_id?: number;
+  ip_group_id?: number;
   ip_type: string;
   firewall_ruleset_ids?: number[];
 }
@@ -121,7 +121,10 @@ async function createNebulaClient(
 
   // Add optional parameters if configured
   if (appConfig.MANAGED_NEBULA_IP_GROUP_POOL_ID) {
-    request.ip_group_pool_id = appConfig.MANAGED_NEBULA_IP_GROUP_POOL_ID;
+    request.ip_group_id = appConfig.MANAGED_NEBULA_IP_GROUP_POOL_ID;
+    console.log(`[Nebula] Setting ip_group_id to ${appConfig.MANAGED_NEBULA_IP_GROUP_POOL_ID} for client ${clientName}`);
+  } else {
+    console.log(`[Nebula] ip_group_id not set (config value: ${appConfig.MANAGED_NEBULA_IP_GROUP_POOL_ID})`);
   }
 
   const firewallRuleIds = getFirewallRuleIdsForEnvironment(environment);
@@ -129,11 +132,15 @@ async function createNebulaClient(
     request.firewall_ruleset_ids = firewallRuleIds;
   }
 
+  console.log(`[Nebula] Creating client for ${clientName} with pool_id: ${request.pool_id}, ip_group_id: ${request.ip_group_id ?? 'not set'}`);
+
   const client = await nebulaApiCall<NebulaClientResponse>(
     "/api/v1/clients",
     "POST",
     request
   );
+
+  console.log(`[Nebula] Client created successfully: id=${client.id}, name=${client.name}`);
 
   return client;
 }
@@ -244,13 +251,183 @@ async function pushSecretToGitHub(input: {
 }
 
 /**
+ * Push a variable to GitHub repository variables (for visibility, not encryption)
+ */
+async function pushVariableToGitHub(input: {
+  repositoryOwner: string;
+  repositoryName: string;
+  variableName: string;
+  variableValue: string;
+}): Promise<{ success: boolean; error?: string }> {
+  try {
+    const githubToken = await getGitHubToken(input.repositoryOwner, input.repositoryName);
+    if (!githubToken) {
+      return { success: false, error: "No GitHub App token available" };
+    }
+
+    const variableUrl = `https://api.github.com/repos/${encodeURIComponent(input.repositoryOwner)}/${encodeURIComponent(input.repositoryName)}/actions/variables/${input.variableName}`;
+    
+    // Try to update first (PATCH to update endpoint)
+    const updateResponse = await fetch(variableUrl, {
+      method: "PATCH",
+      headers: {
+        "Accept": "application/vnd.github+json",
+        "Authorization": `Bearer ${githubToken}`,
+        "User-Agent": "kumpeapps-deployment-bot",
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        name: input.variableName,
+        value: input.variableValue
+      }),
+      signal: AbortSignal.timeout(15000)
+    });
+
+    if (updateResponse.ok) {
+      return { success: true };
+    }
+
+    // If update fails with 404, variable doesn't exist, so create it
+    if (updateResponse.status === 404) {
+      const createUrl = `https://api.github.com/repos/${encodeURIComponent(input.repositoryOwner)}/${encodeURIComponent(input.repositoryName)}/actions/variables`;
+      
+      const createResponse = await fetch(createUrl, {
+        method: "POST",
+        headers: {
+          "Accept": "application/vnd.github+json",
+          "Authorization": `Bearer ${githubToken}`,
+          "User-Agent": "kumpeapps-deployment-bot",
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          name: input.variableName,
+          value: input.variableValue
+        }),
+        signal: AbortSignal.timeout(15000)
+      });
+
+      if (!createResponse.ok) {
+        const errorText = await createResponse.text();
+        return { 
+          success: false, 
+          error: `Failed to create variable: HTTP ${createResponse.status} - ${errorText}` 
+        };
+      }
+
+      return { success: true };
+    }
+
+    // Other error
+    const errorText = await updateResponse.text();
+    return { 
+      success: false, 
+      error: `Failed to update variable: HTTP ${updateResponse.status} - ${errorText}` 
+    };
+  } catch (error) {
+    return { 
+      success: false, 
+      error: error instanceof Error ? error.message : "Unknown error" 
+    };
+  }
+}
+
+/**
+ * Delete a secret from GitHub repository
+ */
+async function deleteSecretFromGitHub(input: {
+  repositoryOwner: string;
+  repositoryName: string;
+  secretName: string;
+}): Promise<{ success: boolean; error?: string }> {
+  try {
+    const githubToken = await getGitHubToken(input.repositoryOwner, input.repositoryName);
+    if (!githubToken) {
+      return { success: false, error: "No GitHub App token available" };
+    }
+
+    const secretUrl = `https://api.github.com/repos/${encodeURIComponent(input.repositoryOwner)}/${encodeURIComponent(input.repositoryName)}/actions/secrets/${input.secretName}`;
+    
+    const response = await fetch(secretUrl, {
+      method: "DELETE",
+      headers: {
+        "Accept": "application/vnd.github+json",
+        "Authorization": `Bearer ${githubToken}`,
+        "User-Agent": "kumpeapps-deployment-bot"
+      },
+      signal: AbortSignal.timeout(15000)
+    });
+
+    // 204 = successfully deleted, 404 = didn't exist (both are success for cleanup)
+    if (response.ok || response.status === 404) {
+      return { success: true };
+    }
+
+    const errorText = await response.text();
+    return { 
+      success: false, 
+      error: `Failed to delete secret: HTTP ${response.status} - ${errorText}` 
+    };
+  } catch (error) {
+    return { 
+      success: false, 
+      error: error instanceof Error ? error.message : "Unknown error" 
+    };
+  }
+}
+
+/**
+ * Delete a variable from GitHub repository
+ */
+async function deleteVariableFromGitHub(input: {
+  repositoryOwner: string;
+  repositoryName: string;
+  variableName: string;
+}): Promise<{ success: boolean; error?: string }> {
+  try {
+    const githubToken = await getGitHubToken(input.repositoryOwner, input.repositoryName);
+    if (!githubToken) {
+      return { success: false, error: "No GitHub App token available" };
+    }
+
+    const variableUrl = `https://api.github.com/repos/${encodeURIComponent(input.repositoryOwner)}/${encodeURIComponent(input.repositoryName)}/actions/variables/${input.variableName}`;
+    
+    const response = await fetch(variableUrl, {
+      method: "DELETE",
+      headers: {
+        "Accept": "application/vnd.github+json",
+        "Authorization": `Bearer ${githubToken}`,
+        "User-Agent": "kumpeapps-deployment-bot"
+      },
+      signal: AbortSignal.timeout(15000)
+    });
+
+    // 204 = successfully deleted, 404 = didn't exist (both are success for cleanup)
+    if (response.ok || response.status === 404) {
+      return { success: true };
+    }
+
+    const errorText = await response.text();
+    return { 
+      success: false, 
+      error: `Failed to delete variable: HTTP ${response.status} - ${errorText}` 
+    };
+  } catch (error) {
+    return { 
+      success: false, 
+      error: error instanceof Error ? error.message : "Unknown error" 
+    };
+  }
+}
+
+/**
  * Provision Nebula clients for all environments when a repository is registered
  * 
  * Creates 3 clients: dev-{owner}-{repo}, stage-{owner}-{repo}, prod-{owner}-{repo}
  * 
- * Also pushes the following secrets to GitHub repository secrets:
- * - DEV_NEBULA_CLIENT_TOKEN, STAGE_NEBULA_CLIENT_TOKEN, PROD_NEBULA_CLIENT_TOKEN
- * - DEV_NEBULA_IP, STAGE_NEBULA_IP, PROD_NEBULA_IP
+ * Also pushes the following to GitHub repository:
+ * - Secrets: DEV_NEBULA_CLIENT_TOKEN, STAGE_NEBULA_CLIENT_TOKEN, PROD_NEBULA_CLIENT_TOKEN
+ * - Secrets: DEV_NEBULA_IP, STAGE_NEBULA_IP, PROD_NEBULA_IP (encrypted)
+ * - Variables: DEV_NEBULA_IP, STAGE_NEBULA_IP, PROD_NEBULA_IP (visible, for future migration)
  * 
  * Returns results for each environment (success/failure)
  */
@@ -341,7 +518,7 @@ export async function provisionNebulaClients(input: {
         });
       }
 
-      // Push IP address
+      // Push IP address as secret
       const ipResult = await pushSecretToGitHub({
         repositoryOwner: input.repositoryOwner,
         repositoryName: input.repositoryName,
@@ -376,6 +553,45 @@ export async function provisionNebulaClients(input: {
             environment,
             secretName: `${envPrefix}_NEBULA_IP`,
             error: ipResult.error
+          }
+        });
+      }
+
+      // Also push IP address as variable for visibility (future: will replace secret)
+      const ipVarResult = await pushVariableToGitHub({
+        repositoryOwner: input.repositoryOwner,
+        repositoryName: input.repositoryName,
+        variableName: `${envPrefix}_NEBULA_IP`,
+        variableValue: client.ip_address
+      });
+
+      if (ipVarResult.success) {
+        await recordAuditEvent({
+          actorType: "system",
+          actorId: "nebula-provisioner",
+          action: "nebula.variable.pushed",
+          resourceType: "github_variable",
+          resourceId: `${envPrefix}_NEBULA_IP`,
+          payload: {
+            repositoryOwner: input.repositoryOwner,
+            repositoryName: input.repositoryName,
+            environment,
+            variableName: `${envPrefix}_NEBULA_IP`
+          }
+        });
+      } else {
+        await recordAuditEvent({
+          actorType: "system",
+          actorId: "nebula-provisioner",
+          action: "nebula.variable.push.failed",
+          resourceType: "github_variable",
+          resourceId: `${envPrefix}_NEBULA_IP`,
+          payload: {
+            repositoryOwner: input.repositoryOwner,
+            repositoryName: input.repositoryName,
+            environment,
+            variableName: `${envPrefix}_NEBULA_IP`,
+            error: ipVarResult.error
           }
         });
       }
@@ -581,4 +797,130 @@ export async function revokeNebulaCertificate(input: {
       error: errorMessage
     };
   }
+}
+
+/**
+ * Clean up all bot-related secrets and variables when the bot is uninstalled or repository is removed
+ * 
+ * Deletes secrets:
+ * - Nebula client tokens: DEV_NEBULA_CLIENT_TOKEN, STAGE_NEBULA_CLIENT_TOKEN, PROD_NEBULA_CLIENT_TOKEN
+ * - Nebula IPs: DEV_NEBULA_IP, STAGE_NEBULA_IP, PROD_NEBULA_IP
+ * - Deploy bot tokens: DEV_DEPLOY_BOT_TOKEN, STAGE_DEPLOY_BOT_TOKEN, PROD_DEPLOY_BOT_TOKEN
+ * - Main bot token: KUMPEAPPS_DEPLOY_BOT_TOKEN
+ * 
+ * Deletes variables:
+ * - Nebula IPs: DEV_NEBULA_IP, STAGE_NEBULA_IP, PROD_NEBULA_IP
+ */
+export async function cleanupRepositorySecrets(input: {
+  repositoryOwner: string;
+  repositoryName: string;
+}): Promise<{ deleted: number; failed: number; errors: string[] }> {
+  const environments: Environment[] = ["dev", "stage", "prod"];
+  const secretNames: string[] = [
+    // Repository token
+    "KUMPEAPPS_DEPLOY_BOT_TOKEN"
+  ];
+
+  const variableNames: string[] = [];
+
+  // Add environment-specific secrets and variables
+  for (const environment of environments) {
+    const envPrefix = environment.toUpperCase();
+    secretNames.push(
+      `${envPrefix}_DEPLOY_BOT_TOKEN`,
+      `${envPrefix}_NEBULA_CLIENT_TOKEN`,
+      `${envPrefix}_NEBULA_IP`
+    );
+    
+    // Also clean up Nebula IP variables
+    variableNames.push(`${envPrefix}_NEBULA_IP`);
+  }
+
+  let deleted = 0;
+  let failed = 0;
+  const errors: string[] = [];
+
+  // Clean up secrets
+  for (const secretName of secretNames) {
+    const result = await deleteSecretFromGitHub({
+      repositoryOwner: input.repositoryOwner,
+      repositoryName: input.repositoryName,
+      secretName
+    });
+
+    if (result.success) {
+      deleted += 1;
+      await recordAuditEvent({
+        actorType: "system",
+        actorId: "nebula-provisioner",
+        action: "secret.cleanup.deleted",
+        resourceType: "github_secret",
+        resourceId: secretName,
+        payload: {
+          repositoryOwner: input.repositoryOwner,
+          repositoryName: input.repositoryName,
+          secretName
+        }
+      });
+    } else {
+      failed += 1;
+      errors.push(`secret ${secretName}: ${result.error}`);
+      await recordAuditEvent({
+        actorType: "system",
+        actorId: "nebula-provisioner",
+        action: "secret.cleanup.failed",
+        resourceType: "github_secret",
+        resourceId: secretName,
+        payload: {
+          repositoryOwner: input.repositoryOwner,
+          repositoryName: input.repositoryName,
+          secretName,
+          error: result.error
+        }
+      });
+    }
+  }
+
+  // Clean up variables
+  for (const variableName of variableNames) {
+    const result = await deleteVariableFromGitHub({
+      repositoryOwner: input.repositoryOwner,
+      repositoryName: input.repositoryName,
+      variableName
+    });
+
+    if (result.success) {
+      deleted += 1;
+      await recordAuditEvent({
+        actorType: "system",
+        actorId: "nebula-provisioner",
+        action: "variable.cleanup.deleted",
+        resourceType: "github_variable",
+        resourceId: variableName,
+        payload: {
+          repositoryOwner: input.repositoryOwner,
+          repositoryName: input.repositoryName,
+          variableName
+        }
+      });
+    } else {
+      failed += 1;
+      errors.push(`variable ${variableName}: ${result.error}`);
+      await recordAuditEvent({
+        actorType: "system",
+        actorId: "nebula-provisioner",
+        action: "variable.cleanup.failed",
+        resourceType: "github_variable",
+        resourceId: variableName,
+        payload: {
+          repositoryOwner: input.repositoryOwner,
+          repositoryName: input.repositoryName,
+          variableName,
+          error: result.error
+        }
+      });
+    }
+  }
+
+  return { deleted, failed, errors };
 }

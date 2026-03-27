@@ -4,7 +4,7 @@ Automatically sync repository secrets from GitHub to the KumpeApps deployment bo
 
 ## Features
 
-- 🔑 **Auto-detect secrets** from deployment config's `env_mappings`
+- 📤 **Sync all secrets** - syncs everything you pass as environment variables
 - 🚀 **Simple setup** - just use the action, token is auto-provisioned
 - 🔒 **Secure** - uses per-repository API tokens, not admin tokens
 - 📝 **Audit trail** - all secret operations are logged
@@ -38,8 +38,8 @@ jobs:
       - uses: kumpeapps/kumpeapps-deployment-bot@v1
         env:
           KUMPEAPPS_DEPLOY_BOT_TOKEN: ${{ secrets.KUMPEAPPS_DEPLOY_BOT_TOKEN }}
-          # Pass all your secrets - the action automatically detects which ones
-          # are needed from your deployment config's env_mappings section
+          # Pass all your secrets - they'll all be synced to the bot.
+          # Each deployment config uses only the secrets it needs.
           DB_PASSWORD_SECRET: ${{ secrets.DB_PASSWORD_SECRET }}
           # Add your other secrets here
 ```
@@ -57,22 +57,22 @@ Go to Actions → Sync Secrets → Run workflow
    - Token only works for that specific repository (not admin access)
    - Provisioning runs at startup and hourly for resilience
 
-2. **Secret Detection** (automatic):
-   - Action reads `.kumpeapps-deploy-bot/{environment}/*.yml`
-   - Extracts secret names from `env_mappings` section
-   - Validates that required secrets are passed as environment variables
-   - Syncs only the secrets that match your config
+2. **Secret Sync** (all secrets):
+   - Action syncs ALL secrets passed as environment variables
+   - No config parsing - syncs everything you pass
+   - Simple and predictable behavior
 
 3. **Deployment** (automatic):
-   - Bot injects secrets as environment variables during deployment
+   - Bot reads each deployment config's `env_mappings`
+   - Injects only the secrets specified in that config as environment variables
    - Secrets are encrypted at rest in bot's database
 
 **Why do I need to list secrets in the workflow?**
 
-GitHub Actions security prevents dynamic secret access (e.g., `${{ secrets[varName] }}`). However, the action automatically detects which secrets are needed from your deployment config, so it will:
-- ✅ Only sync secrets that are in your `env_mappings`
-- ✅ Warn you if required secrets are missing
-- ✅ Skip secrets that aren't needed for your config
+GitHub Actions security prevents dynamic secret access (e.g., `${{ secrets[varName] }}`). The action syncs everything you pass:
+- 📤 Syncs ALL secrets passed as environment variables
+- 🎯 Each deployment config uses what it needs via `env_mappings`
+- 🔄 One workflow serves all environments
 
 ## Configuration
 
@@ -80,24 +80,25 @@ GitHub Actions security prevents dynamic secret access (e.g., `${{ secrets[varNa
 
 | Input | Description | Default |
 |-------|-------------|---------|
-| `environment` | Deployment environment (dev/stage/prod) | `dev` |
-| `config-path` | Path to deployment config (auto-detected if not provided) | `` |
-| `bot-url` | Deployment bot URL | `http://preprod-deployment-bot.mdhome.net:3000` |
+| `bot-url` | Deployment bot URL | `https://deploy.kumpe.app` |
 | `bot-token` | Override token (uses `KUMPEAPPS_DEPLOY_BOT_TOKEN` if not provided) | `` |
 
-### Example: Multiple Environments
+### Example: Syncing All Secrets
 
 ```yaml
 jobs:
-  sync-dev:
+  sync-secrets:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: kumpeapps/kumpeapps-deployment-bot@v1
-        with:
-          environment: dev
         env:
           KUMPEAPPS_DEPLOY_BOT_TOKEN: ${{ secrets.KUMPEAPPS_DEPLOY_BOT_TOKEN }}
+          # Pass all your secrets - they'll all be synced
+          DEV_DEPLOY_BOT_TOKEN: ${{ secrets.DEV_DEPLOY_BOT_TOKEN }}
+          DEV_NEBULA_CLIENT_TOKEN: ${{ secrets.DEV_NEBULA_CLIENT_TOKEN }}
+          PROD_DEPLOY_BOT_TOKEN: ${{ secrets.PROD_DEPLOY_BOT_TOKEN }}
+          PROD_NEBULA_CLIENT_TOKEN: ${{ secrets.PROD_NEBULA_CLIENT_TOKEN }}
           DB_PASSWORD_SECRET: ${{ secrets.DB_PASSWORD_DEV }}
   
   sync-prod:

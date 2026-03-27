@@ -246,6 +246,7 @@ model CaddyRelease {
   caddyHost      String   @db.VarChar(255)
   configChecksum String   @db.VarChar(64)
   reloadStatus   String   @db.VarChar(50)
+  deployedFiles  Json     @default("[]") @map("deployed_files") // Array of unique file names deployed to Caddy server
   createdAt      DateTime @default(now())
   deployment     Deployment @relation(fields: [deploymentId], references: [id], onDelete: Cascade)
 

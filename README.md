@@ -148,6 +148,10 @@ Set or verify the following env vars on the bot server:
 	- **Legacy alternative:** Set `GITHUB_API_TOKEN` with a Personal Access Token
 		- Less secure; only use if GitHub App auth is not feasible
 		- Tokens do not auto-refresh and have broader permissions
+	- **Optional:** `BOT_USER_TOKEN` - Personal Access Token for kumpeapps-bot-deploy user account
+		- Enables auto-accepting collaborator invitations on personal repositories
+		- Required scope: `repo` (full control of private repositories)
+		- Without this, initialization issues/PRs won't be assigned until invitation is manually accepted
 3. Admin login (GUI):
 	- `ADMIN_GITHUB_USERNAME`
 	- `GITHUB_OAUTH_CLIENT_ID`

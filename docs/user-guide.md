@@ -64,11 +64,13 @@ caddy:
 env_mappings:
   DATABASE_PASSWORD: DB_PASSWORD_SECRET
 deploy_rules:
-  - branch: develop
-    environments: [dev]
-  - branch: main
-    environments: [stage, prod]
+  - environment: dev
+    branches:
+      include: [develop]
+      exclude: []
 ```
+
+> **Note:** This config is for the dev environment. Create similar configs in `.kumpeapps-deploy-bot/stage/` and `.kumpeapps-deploy-bot/prod/` for other environments, adjusting the `environment` field and branch rules accordingly.
 
 ### Step 4: Sync Your Secrets
 
@@ -95,7 +97,7 @@ jobs:
         env:
           # This token is auto-created by the bot when the app is installed
           KUMPEAPPS_DEPLOY_BOT_TOKEN: ${{ secrets.KUMPEAPPS_DEPLOY_BOT_TOKEN }}
-          # List all secrets from your env_mappings:
+          # Pass all your secrets - they'll all be synced:
           DB_PASSWORD_SECRET: ${{ secrets.DB_PASSWORD_SECRET }}
 ```
 
@@ -106,16 +108,14 @@ jobs:
 3. Run the workflow manually or push to trigger it
 
 **How it works:**
-- The action reads your deployment configs
-- Extracts secret names from `env_mappings`
-- Validates that all required secrets are passed as environment variables
-- Syncs only the secrets that match your config
-- Warns you if required secrets are missing
-- Skips secrets that aren't in your env_mappings
+- The action syncs ALL secrets you pass as environment variables
+- No config parsing - simple and predictable
+- Each deployment config specifies which secrets it needs in `env_mappings`
+- Bot injects only the secrets specified in that config during deployment
 
 **Why list secrets in the workflow?**
 
-Due to GitHub Actions security, you must pass secrets as environment variables. However, **the action automatically determines which secrets to sync** based on your deployment config. You just need to pass them through once, and the action handles the rest.
+Due to GitHub Actions security, you must pass secrets as environment variables. **The action syncs everything you pass** to the bot's database. Then each deployment config uses only the secrets it needs via its `env_mappings` section.
 
 For more details, see [README-ACTION.md](../README-ACTION.md).
 
@@ -129,8 +129,8 @@ For more details, see [README-ACTION.md](../README-ACTION.md).
 | `assigned_username` | Your GitHub username | `your-username` |
 | `vm_hostname` | Target VM hostname | `prod-vm-01` |
 | `domains` | Domains to serve traffic to | `["example.com", "api.example.com"]` |
-| `docker_compose` | Compose file content (inline) or path reference | See below |
-| `caddy` | Caddy reverse proxy configuration blocks | See Caddy section |
+| `docker_compose` | Compose file path or inline content | See below |
+| `caddy` | Caddy config file paths or inline content | See Caddy section |
 | `env_mappings` | Map env vars to GitHub repository secrets | `DATABASE_URL: DB_SECRET_NAME` |
 | `deploy_rules` | Branch/tag rules to trigger deployment | See deploy_rules section |
 
@@ -146,10 +146,25 @@ For more details, see [README-ACTION.md](../README-ACTION.md).
 
 ### Docker Compose
 
-You can define Docker services inline:
+**Recommended: Use file references**
+
+Place your docker-compose.yml in the same directory as your deployment config and reference it:
 
 ```yaml
-docker_compose:
+docker_compose: docker-compose.yml
+```
+
+Paths are resolved relative to the deployment config file:
+- `docker-compose.yml` or `./docker-compose.yml` - Same directory as config
+- `../docker-compose.yml` - Parent directory
+- `/path/from/repo/root.yml` - Absolute from repository root
+
+**Backwards compatible: Inline content**
+
+You can also define Docker services inline:
+
+```yaml
+docker_compose: |
   version: '3.8'
   services:
     web:
@@ -162,24 +177,61 @@ docker_compose:
         POSTGRES_PASSWORD: $DB_PASSWORD
 ```
 
-Or reference a file in your repository:
+**Automatic Managed Nebula Client Injection**
+
+The bot automatically injects a Managed Nebula VPN client service into every deployment. This service is added as the first service in your compose file:
 
 ```yaml
-docker_compose:
-  path: compose/docker-compose.yml
+services:
+  client:  # Automatically added by the bot
+    image: ghcr.io/kumpeapps/managed-nebula/client:kumpeapps
+    restart: unless-stopped
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun
+    environment:
+      SERVER_URL: https://nebula.kumpedns.us:4200/api
+      CLIENT_TOKEN: ${NEBULA_CLIENT_TOKEN}  # Automatically provided
+      POLL_INTERVAL_HOURS: 1
+    network_mode: host
+  # Your services follow...
+  web:
+    image: myapp:latest
 ```
+
+**You don't need to manually add this service** - it's injected during deployment. The `NEBULA_CLIENT_TOKEN` is automatically provided as a repository secret.
 
 ### Caddy Reverse Proxy Configuration
 
-Define one or more Caddy site blocks:
+**Recommended: Use file references**
+
+Define one or more Caddyfile blocks by referencing files:
 
 ```yaml
 caddy:
-  - |
+  main: caddyfile
+  api: api-caddyfile
+```
+
+**Important:** Files are deployed with unique names to avoid conflicts between repositories. The bot automatically generates names like: `{owner}-{env}-{repo}-{yourFileName}`. Files without extensions get `.caddy` added automatically. For example:
+- `kumpeapps-dev-myapp-main.caddy` (from `main: caddyfile`)
+- `acme-prod-api-gateway-main.caddy` (from `main: caddyfile` in different repo)
+- `kumpeapps-stage-myapp-api.conf` (from `api: api.conf` - extension preserved)
+
+This ensures multiple repos can deploy to the same Caddy server without overwriting each other's configs.
+
+**Backwards compatible: Inline content**
+
+Or define inline Caddyfile blocks:
+
+```yaml
+caddy:
+  main: |
     example.com www.example.com {
       reverse_proxy {{vm.ip}}:3000
     }
-  - |
+  api: |
     api.example.com {
       reverse_proxy {{nebula.ip}}:8000
     }
@@ -235,34 +287,143 @@ The following secrets are automatically created when the bot is installed:
 
 ### Deploy Rules
 
-Control when and where deployments happen:
+Control when deployments happen based on branches, PR labels, or release events. Since configs are organized by environment folders (`.kumpeapps-deploy-bot/dev/`, `.kumpeapps-deploy-bot/stage/`, `.kumpeapps-deploy-bot/prod/`), each config file should define rules for **only its own environment**.
+
+Deploy rules support three trigger types:
+- **Branch-based**: Deploy when code is pushed to matching branches
+- **Label-based**: Deploy when a PR receives a specific label (auto-removes from other PRs)
+- **Release-based**: Deploy when a GitHub release is published
+
+#### Branch-Based Deployment
+
+**Dev config example** (`.kumpeapps-deploy-bot/dev/myapp.yml`):
 
 ```yaml
 deploy_rules:
-  # Deploy to dev on all pushes to develop branch
-  - branch: develop
-    environments: [dev]
-  
-  # Deploy to stage on all pushes to main, but not prod (manual only)
-  - branch: main
-    environments: [stage]
-  
-  # Deploy to prod only on tagged releases
-  - tag: "release-*"
-    environments: [prod]
-  
-  # Exclude specific branches from deployment
-  - branch: "feature/**"
-    exclude: true
+  - environment: dev
+    branches:
+      include:
+        - develop
+        - feature/**
+      exclude: []
 ```
 
-Supported matchers:
-- `branch`: branch name or glob pattern (e.g., `feature/**`, `release-*`)
-- `tag`: tag name or glob pattern
-- `exclude`: if `true`, skip deployment for matching refs
-- `environments`: list of target environments (`dev`, `stage`, `prod`)
+**Stage config example** (`.kumpeapps-deploy-bot/stage/myapp.yml`):
 
-If no rules match a push, the deployment is not run automatically (but can still be triggered manually).
+```yaml
+deploy_rules:
+  - environment: stage
+    branches:
+      include:
+        - main
+        - release/**
+      exclude: []
+```
+
+**Prod config example** (`.kumpeapps-deploy-bot/prod/myapp.yml`):
+
+```yaml
+deploy_rules:
+  - environment: prod
+    branches:
+      include:
+        - main
+      exclude:
+        - feature/**
+        - develop
+```
+
+Branch patterns support glob syntax (`feature/**`, `release-*`). If no rules match a push, deployment is skipped.
+
+#### Label-Based Deployment
+
+Deploy specific PRs by adding a label. Perfect for dev environments where you want manual control over which PR is deployed.
+
+**How it works:**
+1. Add the configured label (e.g., `deploy-dev`) to any PR
+2. Bot automatically removes the label from all other open PRs
+3. Every subsequent push to that PR triggers deployment automatically
+4. Only one PR can be deployed at a time (enforced by label cleanup)
+
+**Dev config example with label trigger (any branch)**:
+
+```yaml
+deploy_rules:
+  - environment: dev
+    labels:
+      - deploy-dev
+      - preview-deploy
+```
+
+**With optional branch filtering**:
+
+```yaml
+deploy_rules:
+  - environment: dev
+    labels:
+      - deploy-dev
+    branches:
+      include:
+        - feature/**
+      exclude:
+        - main
+```
+
+**Usage**: 
+- Add the `deploy-dev` label to any PR
+- Bot removes `deploy-dev` from any other PRs
+- Every push to that PR's branch deploys to dev
+- Remove the label or close the PR to stop deployments
+
+**Note**: Branch patterns are optional. Without them, any PR with the label will deploy regardless of branch name. With branch patterns, the PR's branch must match the `include`/`exclude` rules even if it has the label.
+
+#### Release-Based Deployment
+
+Deploy when GitHub releases are published. Useful for production deployments tied to releases.
+
+**Prod config example with release trigger**:
+
+```yaml
+deploy_rules:
+  - environment: prod
+    release:
+      types:
+        - published
+      exclude_prerelease: true
+```
+
+**Options**:
+- `types`: Array of release event types (`published`, `created`, `released`, `edited`)
+  - `published`: Default - when you publish a draft release or create a new release
+  - `created`: When a release is first created
+  - `released`: Legacy alternative to `published`
+  - `edited`: When an existing release is editedexclude_prerelease`: If `true`, pre-releases are skipped (default: `false`)
+
+**Usage**: Create a release in GitHub (not a pre-release if `exclude_prerelease: true`) to trigger production deployment.
+
+#### Combining Multiple Trigger Types
+
+You can combine different trigger types in one config:
+
+```yaml
+deploy_rules:
+  - environment: prod
+    labels:
+      - deploy-prod
+      - emergency-hotfix
+    branches:
+      include:
+        - main
+    release:
+      types:
+        - published
+      exclude_prerelease: true
+```
+
+This config deploys to prod when:
+- A release is published (not pre-release), OR
+- Code is pushed to `main`, OR
+- A PR receives the `deploy-prod` or `emergency-hotfix` label
 
 ## Triggering Deployments
 
@@ -365,8 +526,10 @@ env_mappings:
   API_KEY: DEV_API_KEY
 
 deploy_rules:
-  - branch: develop
-    environments: [dev]
+  - environment: dev
+    branches:
+      include: [develop]
+      exclude: []
 ```
 
 Push to `develop` branch → deployment runs automatically.
@@ -392,8 +555,10 @@ docker_compose:
 env_mappings:
   DATABASE_URL: DEV_DB_URL
 deploy_rules:
-  - branch: develop
-    environments: [dev]
+  - environment: dev
+    branches:
+      include: [develop, feature/**]
+      exclude: []
 ```
 
 **Stage** (`.kumpeapps-deploy-bot/stage/api.yml`):
@@ -406,8 +571,10 @@ docker_compose:
   # Similar to dev, but may use different image tag/config
 # ... 
 deploy_rules:
-  - branch: main
-    environments: [stage]
+  - environment: stage
+    branches:
+      include: [main, release/**]
+      exclude: []
 ```
 
 **Production** (`.kumpeapps-deploy-bot/prod/api.yml`):
@@ -420,8 +587,10 @@ docker_compose:
   # Production-grade config
 # ...
 deploy_rules:
-  - tag: "release-*"
-    environments: [prod]
+  - environment: prod
+    branches:
+      include: [main]
+      exclude: [develop, feature/**]
 ```
 
 ### Scenario 3: Database Migration with App Deployment

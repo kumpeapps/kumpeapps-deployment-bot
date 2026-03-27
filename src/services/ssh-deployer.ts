@@ -29,6 +29,10 @@ export type CaddyDeployInput = {
   remoteConfigDir: string;
   validateCommand?: string;
   reloadCommand: string;
+  // Added for unique file naming
+  repositoryOwner: string;
+  repositoryName: string;
+  environment: string;
 };
 
 const execFileAsync = promisify(execFile);
@@ -271,15 +275,40 @@ export async function compensateComposeOnVm(input: {
   return stdout.trim() || "docker compose down completed";
 }
 
-export async function deployCaddyConfig(input: CaddyDeployInput): Promise<string> {
+/**
+ * Generate unique Caddy config file name for multi-repo deployments
+ * Format: {owner}-{env}-{repo}-{originalFileName}
+ * This ensures uniqueness even when repo names are duplicated across orgs
+ * Adds .caddy extension if no extension is present
+ */
+function generateCaddyFileName(owner: string, repo: string, environment: string, originalName: string): string {
+  // Sanitize components to ensure valid filenames
+  const sanitize = (str: string) => str.replace(/[^a-zA-Z0-9._-]/g, '-').toLowerCase();
+  
+  // Add .caddy extension if file has no extension
+  let fileName = originalName;
+  if (!fileName.includes('.')) {
+    fileName = `${fileName}.caddy`;
+  }
+  
+  return `${sanitize(owner)}-${sanitize(environment)}-${sanitize(repo)}-${fileName}`;
+}
+
+export async function deployCaddyConfig(input: CaddyDeployInput): Promise<{ message: string; deployedFiles: string[] }> {
   if (input.dryRun) {
-    return "(dry run — no SSH commands executed)";
+    return {
+      message: "(dry run — no SSH commands executed)",
+      deployedFiles: Object.keys(input.caddyConfig).map(name =>
+        generateCaddyFileName(input.repositoryOwner, input.repositoryName, input.environment, name)
+      )
+    };
   }
 
   const workDir = await mkdtemp(join(tmpdir(), "kumpeapps-caddy-deploy-"));
   const remoteDir = input.remoteConfigDir;
   const backupDir = `/tmp/kumpeapps-caddy-backup-${Date.now()}`;
   const backupPlan: Array<{ targetPath: string; backupPath: string; hadOriginal: boolean }> = [];
+  const deployedFiles: string[] = [];
 
   try {
     await runRemoteSsh(
@@ -302,8 +331,17 @@ export async function deployCaddyConfig(input: CaddyDeployInput): Promise<string
     );
 
     let fileIndex = 0;
-    for (const [fileName, content] of Object.entries(input.caddyConfig)) {
-      const targetPath = `${remoteDir}/${fileName}`;
+    for (const [originalFileName, content] of Object.entries(input.caddyConfig)) {
+      // Generate unique file name to avoid conflicts between repos
+      const uniqueFileName = generateCaddyFileName(
+        input.repositoryOwner,
+        input.repositoryName,
+        input.environment,
+        originalFileName
+      );
+      deployedFiles.push(uniqueFileName);
+
+      const targetPath = `${remoteDir}/${uniqueFileName}`;
       const backupPath = `${backupDir}/file-${fileIndex}`;
       fileIndex += 1;
 
@@ -320,7 +358,7 @@ export async function deployCaddyConfig(input: CaddyDeployInput): Promise<string
       const hadOriginal = existsResult.stdout.trim().endsWith("1");
       backupPlan.push({ targetPath, backupPath, hadOriginal });
 
-      const localPath = join(workDir, fileName);
+      const localPath = join(workDir, uniqueFileName);
       await writeFile(localPath, content, "utf8");
       await copyToRemote(
         {
@@ -356,7 +394,10 @@ export async function deployCaddyConfig(input: CaddyDeployInput): Promise<string
         },
         input.reloadCommand
       );
-      return stdout.trim() || "caddy reload completed";
+      return {
+        message: stdout.trim() || "caddy reload completed",
+        deployedFiles
+      };
     } catch (error) {
       let rollbackError: unknown = null;
 

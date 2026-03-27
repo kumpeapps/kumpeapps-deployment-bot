@@ -20,6 +20,13 @@ const envBoolean = () =>
       return false;
     });
 
+// Custom optional number parser that handles empty strings
+const envOptionalNumber = () =>
+  z.preprocess((val) => {
+    if (val === "" || val === undefined || val === null) return undefined;
+    return val;
+  }, z.coerce.number().int().positive().optional());
+
 const EnvSchema = z.object({
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
   PORT: z.coerce.number().int().positive().default(3000),
@@ -44,6 +51,7 @@ const EnvSchema = z.object({
   GITHUB_APP_PRIVATE_KEY: z.string().default(""),
   GITHUB_APP_PRIVATE_KEY_PATH: z.string().default(""),
   GITHUB_APP_WEBHOOK_SECRET: z.string().min(1),
+  BOT_USER_TOKEN: z.string().default(""),
   ADMIN_API_TOKEN: z.string().min(1),
   ADMIN_GITHUB_USERNAME: z.string().default(""),
   ADMIN_SESSION_SECRET: z.string().default(""),
@@ -142,7 +150,7 @@ const EnvSchema = z.object({
   MANAGED_NEBULA_API_KEY: z.string().default(""),
   MANAGED_NEBULA_API_TIMEOUT_MS: z.coerce.number().int().positive().default(30000),
   MANAGED_NEBULA_IP_POOL_ID: z.coerce.number().int().positive().default(1),
-  MANAGED_NEBULA_IP_GROUP_POOL_ID: z.coerce.number().int().positive().optional(),
+  MANAGED_NEBULA_IP_GROUP_POOL_ID: envOptionalNumber(),
   // Environment-specific group IDs (comma-separated)
   MANAGED_NEBULA_DEV_GROUP_IDS: z.string().default(""),
   MANAGED_NEBULA_STAGE_GROUP_IDS: z.string().default(""),
@@ -196,3 +204,13 @@ export const appConfig: AppConfig = {
   MANAGED_NEBULA_STAGE_FIREWALL_RULE_IDS: parseIdList(parsedEnv.MANAGED_NEBULA_STAGE_FIREWALL_RULE_IDS),
   MANAGED_NEBULA_PROD_FIREWALL_RULE_IDS: parseIdList(parsedEnv.MANAGED_NEBULA_PROD_FIREWALL_RULE_IDS)
 };
+
+// Debug logging for Managed Nebula configuration (only in development)
+if (appConfig.MANAGED_NEBULA_ENABLED && process.env.NODE_ENV !== 'production') {
+  console.log('[Config] Managed Nebula configuration loaded:');
+  console.log(`  - IP_POOL_ID: ${appConfig.MANAGED_NEBULA_IP_POOL_ID}`);
+  console.log(`  - IP_GROUP_POOL_ID: ${appConfig.MANAGED_NEBULA_IP_GROUP_POOL_ID ?? 'not set'}`);
+  console.log(`  - DEV_GROUP_IDS: [${appConfig.MANAGED_NEBULA_DEV_GROUP_IDS.join(', ')}]`);
+  console.log(`  - STAGE_GROUP_IDS: [${appConfig.MANAGED_NEBULA_STAGE_GROUP_IDS.join(', ')}]`);
+  console.log(`  - PROD_GROUP_IDS: [${appConfig.MANAGED_NEBULA_PROD_GROUP_IDS.join(', ')}]`);
+}

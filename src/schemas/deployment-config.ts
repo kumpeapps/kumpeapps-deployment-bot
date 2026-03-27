@@ -7,7 +7,12 @@ export const DeployRulesSchema = z.object({
   branches: z.object({
     include: z.array(z.string().min(1)).default([]),
     exclude: z.array(z.string().min(1)).default([])
-  }).default({ include: [], exclude: [] })
+  }).default({ include: [], exclude: [] }).optional(),
+  labels: z.array(z.string().min(1)).optional(), // When PR receives one of these labels, deploy and remove from other PRs
+  release: z.object({
+    types: z.array(z.enum(["published", "created", "released", "edited"])).default(["published"]),
+    exclude_prerelease: z.boolean().default(false)
+  }).optional()
 });
 
 export const DeploymentConfigSchema = z.object({
@@ -21,7 +26,8 @@ export const DeploymentConfigSchema = z.object({
   env_mappings: z.record(z.string().min(1), z.string().min(1)),
   deploy_rules: z.array(DeployRulesSchema).min(1),
   ssh_port: z.number().int().positive().optional(), // Optional SSH port override for VM
-  caddy_ssh_port: z.number().int().positive().optional() // Optional SSH port override for Caddy server
+  caddy_ssh_port: z.number().int().positive().optional(), // Optional SSH port override for Caddy server
+  authorized_admins: z.array(z.string().min(1)).optional() // Optional list of admin usernames or smart groups (e.g., "github.repo.collaborators")
 });
 
 export type DeploymentConfig = z.infer<typeof DeploymentConfigSchema>;
