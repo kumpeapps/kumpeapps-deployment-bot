@@ -95,7 +95,14 @@ const EnvSchema = z.object({
   SSH_ALERT_FINAL_FAILURES_1H_HIGH: z.coerce.number().int().nonnegative().default(10),
   SSH_ALERT_TIMEOUT_FAILURES_1H_HIGH: z.coerce.number().int().nonnegative().default(3),
   SSH_STRICT_HOST_KEY_CHECKING: z.enum(["yes", "no", "accept-new"]).default("accept-new"),
-  SSH_KNOWN_HOSTS_PATH: z.string().default("/root/.ssh/known_hosts"),
+  SSH_KNOWN_HOSTS_PATH: z.string()
+    .default("/root/.ssh/known_hosts")
+    .refine(
+      (path) => !path.endsWith('/'),
+      {
+        message: "SSH_KNOWN_HOSTS_PATH must be a file path, not a directory (should not end with /). Example: /root/.ssh/known_hosts or /dev/null"
+      }
+    ),
   CADDY_SSH_USER: z.string().default("root"),
   CADDY_SSH_KEY_PATH: z.string().default("/root/.ssh/id_rsa"),
   CADDY_SSH_PORT: z.coerce.number().int().positive().default(22),

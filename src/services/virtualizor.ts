@@ -212,8 +212,11 @@ async function pollVmReady(vmId: string, knownIp?: string): Promise<string> {
         // Remove old host key if IP is reused from a destroyed VM
         // This prevents "WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED" errors
         const knownHostsFile = appConfig.SSH_KNOWN_HOSTS_PATH;
+        const sshPort = appConfig.VM_SSH_PORT;
         try {
+          // Clear both IP and [IP]:port format
           await execAsync(`ssh-keygen -R ${vmIp} -f ${knownHostsFile} 2>/dev/null || true`);
+          await execAsync(`ssh-keygen -R [${vmIp}]:${sshPort} -f ${knownHostsFile} 2>/dev/null || true`);
           console.log(`[Virtualizor API] Cleared old host key for ${vmIp} from known_hosts`);
         } catch (keygenError) {
           // Non-fatal, continue with SSH test
@@ -221,11 +224,10 @@ async function pollVmReady(vmId: string, knownIp?: string): Promise<string> {
         }
         
         // Test SSH connectivity with a quick timeout using configured key
-        // Use StrictHostKeyChecking=accept-new to accept new keys but not changed keys
-        // Also set UserKnownHostsFile to ensure we're using the right file
+        // Use StrictHostKeyChecking=no because VMs can be recreated with new keys (IP reuse)
+        // accept-new doesn't work for changed keys, only new hosts
         const sshKeyPath = appConfig.VM_SSH_KEY_PATH;
-        const sshPort = appConfig.VM_SSH_PORT;
-        const sshCommand = `ssh -i ${sshKeyPath} -p ${sshPort} -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=${knownHostsFile} ${appConfig.VM_SSH_USER}@${vmIp} 'echo ok'`;
+        const sshCommand = `ssh -i ${sshKeyPath} -p ${sshPort} -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=no -o UserKnownHostsFile=${knownHostsFile} ${appConfig.VM_SSH_USER}@${vmIp} 'echo ok'`;
         
         // Log the exact command on first few attempts
         if (pollCount <= 3) {
@@ -591,6 +593,36 @@ async function ensureViaApi(input: VmEnsureInput): Promise<VmEnsureResult> {
       const metadata = existingVm.metadata as any;
       let vmIp = metadata?.ip;
       
+      // If VM is in provisioning state, try to complete provisioning
+      if (existingVm.state === "provisioning") {
+        console.log(`[Virtualizor API] VM ${vmId} is in provisioning state, attempting to complete...`);
+        try {
+          // Poll for readiness
+          vmIp = await pollVmReady(vmId, vmIp !== "pending" ? vmIp : undefined);
+          
+          // Update to running state with confirmed IP
+          await prisma.vm.update({
+            where: { id: existingVm.id },
+            data: {
+              state: "running",
+              metadata: {
+                ...metadata,
+                ip: vmIp,
+                readyAt: new Date().toISOString(),
+                updatedAt: new Date().toISOString()
+              }
+            }
+          });
+          
+          console.log(`[Virtualizor API] VM ${vmId} provisioning completed, now running with IP ${vmIp}`);
+          return { vmId, vmIp, created: false };
+        } catch (pollError) {
+          // Polling failed again - keep in provisioning state for next retry
+          console.warn(`[Virtualizor API] VM ${vmId} still not ready, will retry: ${pollError}`);
+          throw pollError;
+        }
+      }
+      
       // Check if hostname has changed and needs to be updated in Virtualizor
       if (existingVm.vmHostname !== input.vmHostname) {
         console.log(`[Virtualizor API] Hostname changed from ${existingVm.vmHostname} to ${input.vmHostname}, updating...`);
@@ -784,10 +816,8 @@ async function ensureViaApi(input: VmEnsureInput): Promise<VmEnsureResult> {
 
   const createdVmId = parseVmIdFromCreateResponse(created);
   if (createdVmId) {
-    // Poll for VM readiness and get confirmed IP
-    const confirmedIp = await pollVmReady(createdVmId, ipAddress);
-    
-    // Persist VM to database - repository must already exist from GitHub App installation
+    // Persist VM to database IMMEDIATELY after creation (before polling)
+    // This ensures retries can find the VM even if polling times out
     const [owner, name] = input.repositoryFullName.split('/');
     const repository = await prisma.repository.findUnique({ 
       where: { owner_name: { owner, name } } 
@@ -806,14 +836,15 @@ async function ensureViaApi(input: VmEnsureInput): Promise<VmEnsureResult> {
       }
     });
     
+    // Create VM record with initial state (IP may not be confirmed yet)
     await prisma.vm.create({
       data: {
         vmHostname: input.vmHostname,
         environment: input.environment,
         virtualizorVmId: createdVmId,
-        state: "running",
+        state: "provisioning",
         metadata: {
-          ip: confirmedIp,
+          ip: ipAddress || "pending",
           assignedUsername: input.assignedUsername,
           createdAt: new Date().toISOString()
         },
@@ -826,7 +857,31 @@ async function ensureViaApi(input: VmEnsureInput): Promise<VmEnsureResult> {
       }
     });
     
-    console.log(`[Virtualizor API] VM ${createdVmId} created and persisted to database with IP ${confirmedIp}`);
+    console.log(`[Virtualizor API] VM ${createdVmId} persisted to database, now polling for readiness...`);
+    
+    // Poll for VM readiness and get confirmed IP
+    const confirmedIp = await pollVmReady(createdVmId, ipAddress);
+    
+    // Update VM state to running with confirmed IP
+    await prisma.vm.update({
+      where: {
+        repositoryId_environment: {
+          repositoryId: repository.id,
+          environment: input.environment
+        }
+      },
+      data: {
+        state: "running",
+        metadata: {
+          ip: confirmedIp,
+          assignedUsername: input.assignedUsername,
+          createdAt: new Date().toISOString(),
+          readyAt: new Date().toISOString()
+        }
+      }
+    });
+    
+    console.log(`[Virtualizor API] VM ${createdVmId} confirmed ready with IP ${confirmedIp}`);
     return { vmId: createdVmId, vmIp: confirmedIp, created: true };
   }
 
@@ -835,9 +890,8 @@ async function ensureViaApi(input: VmEnsureInput): Promise<VmEnsureResult> {
     for (const [vpsid, vm] of Object.entries(afterCreate.vs)) {
       if (vm.hostname === input.vmHostname) {
         const vmId = String(vm.vpsid ?? vpsid);
-        const confirmedIp = await pollVmReady(vmId, ipAddress);
         
-        // Persist VM to database - repository must already exist from GitHub App installation
+        // Persist VM to database IMMEDIATELY after finding it (before polling)
         const [owner, name] = input.repositoryFullName.split('/');
         const repository = await prisma.repository.findUnique({ 
           where: { owner_name: { owner, name } } 
@@ -856,14 +910,15 @@ async function ensureViaApi(input: VmEnsureInput): Promise<VmEnsureResult> {
           }
         });
         
+        // Create VM record with initial state
         await prisma.vm.create({
           data: {
             vmHostname: input.vmHostname,
             environment: input.environment,
             virtualizorVmId: vmId,
-            state: "running",
+            state: "provisioning",
             metadata: {
-              ip: confirmedIp,
+              ip: ipAddress || "pending",
               assignedUsername: input.assignedUsername,
               createdAt: new Date().toISOString()
             },
@@ -876,7 +931,31 @@ async function ensureViaApi(input: VmEnsureInput): Promise<VmEnsureResult> {
           }
         });
         
-        console.log(`[Virtualizor API] VM ${vmId} created and persisted to database with IP ${confirmedIp}`);
+        console.log(`[Virtualizor API] VM ${vmId} persisted to database, now polling for readiness...`);
+        
+        // Poll for VM readiness
+        const confirmedIp = await pollVmReady(vmId, ipAddress);
+        
+        // Update VM state to running with confirmed IP
+        await prisma.vm.update({
+          where: {
+            repositoryId_environment: {
+              repositoryId: repository.id,
+              environment: input.environment
+            }
+          },
+          data: {
+            state: "running",
+            metadata: {
+              ip: confirmedIp,
+              assignedUsername: input.assignedUsername,
+              createdAt: new Date().toISOString(),
+              readyAt: new Date().toISOString()
+            }
+          }
+        });
+        
+        console.log(`[Virtualizor API] VM ${vmId} confirmed ready with IP ${confirmedIp}`);
         return { vmId, vmIp: confirmedIp, created: true };
       }
     }

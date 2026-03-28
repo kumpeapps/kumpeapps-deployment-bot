@@ -1,4 +1,6 @@
 import Fastify from "fastify";
+import { mkdir, writeFile, chmod, access, constants } from "fs/promises";
+import { dirname } from "path";
 import { appConfig } from "./config.js";
 import { prisma } from "./db.js";
 import { registerAuditEventRoutes } from "./routes/audit-events.js";
@@ -9,6 +11,7 @@ import { registerHealthRoutes } from "./routes/health.js";
 import { registerOperationsRoutes } from "./routes/operations.js";
 import { registerRepositoryConfigRoutes } from "./routes/repository-configs.js";
 import { registerRepositorySecretRoutes } from "./routes/repository-secrets.js";
+import { registerRepositoryManagementRoutes } from "./routes/repository-management.js";
 import { registerPlanRoutes } from "./routes/plans.js";
 import { registerRbacRoutes } from "./routes/rbac.js";
 import { registerUserRoutes } from "./routes/users.js";
@@ -122,6 +125,7 @@ app.register(registerHealthRoutes);
 app.register(registerWebhookRoutes, { webhookSecret: appConfig.GITHUB_APP_WEBHOOK_SECRET });
 app.register(registerUserRoutes, { adminToken: appConfig.ADMIN_API_TOKEN });
 app.register(registerRepositorySecretRoutes, { adminToken: appConfig.ADMIN_API_TOKEN });
+app.register(registerRepositoryManagementRoutes, { adminToken: appConfig.ADMIN_API_TOKEN });
 app.register(registerPlanRoutes, { adminToken: appConfig.ADMIN_API_TOKEN });
 app.register(registerRepositoryConfigRoutes, { adminToken: appConfig.ADMIN_API_TOKEN });
 app.register(registerOperationsRoutes, { adminToken: appConfig.ADMIN_API_TOKEN });
@@ -133,15 +137,82 @@ app.register(registerDeploymentQueryRoutes, { adminToken: appConfig.ADMIN_API_TO
 app.register(registerRbacRoutes, { adminToken: appConfig.ADMIN_API_TOKEN });
 app.register(registerAdminDashboardRoutes);
 
-app.get("/", async () => {
-  return {
-    service: "kumpeapps-deployment-bot",
-    status: "running"
-  };
+app.get("/", async (_request, reply) => {
+  return reply.redirect("/admin");
 });
+
+/**
+ * Ensure SSH known_hosts file and directory exist with proper permissions
+ * This prevents SSH errors when StrictHostKeyChecking=accept-new tries to write to the file
+ */
+async function ensureSshKnownHostsFileExists(): Promise<void> {
+  try {
+    const knownHostsPath = appConfig.SSH_KNOWN_HOSTS_PATH;
+    
+    // Validate path - must not be a directory or end with /
+    if (knownHostsPath.endsWith('/')) {
+      throw new Error(`SSH_KNOWN_HOSTS_PATH must be a file path, not a directory. Got: ${knownHostsPath} - Please set it to a full file path like /root/.ssh/known_hosts or /dev/null`);
+    }
+    
+    // Special case: /dev/null doesn't need setup
+    if (knownHostsPath === "/dev/null") {
+      console.log(`[SSH Setup] Using /dev/null for known_hosts (host key verification disabled)`);
+      return;
+    }
+    
+    const knownHostsDir = dirname(knownHostsPath);
+    
+    console.log(`[SSH Setup] Ensuring known_hosts file exists: ${knownHostsPath}`);
+    
+    // Create directory if it doesn't exist
+    await mkdir(knownHostsDir, { recursive: true, mode: 0o755 });
+    console.log(`[SSH Setup] Directory ensured: ${knownHostsDir}`);
+    
+    // Create empty known_hosts file if it doesn't exist
+    try {
+      await writeFile(knownHostsPath, "", { flag: "wx", mode: 0o644 });
+      console.log(`[SSH Setup] Created known_hosts file: ${knownHostsPath}`);
+    } catch (error: any) {
+      if (error?.code === "EEXIST") {
+        console.log(`[SSH Setup] Known_hosts file already exists: ${knownHostsPath}`);
+      } else {
+        throw error;
+      }
+    }
+    
+    // Ensure file has proper permissions (make it writable)
+    try {
+      await chmod(knownHostsPath, 0o644);
+      console.log(`[SSH Setup] Set permissions 0o644 on ${knownHostsPath}`);
+    } catch (error) {
+      console.warn(`[SSH Setup] Could not set permissions on known_hosts:`, error);
+    }
+    
+    // Verify the file is actually writable
+    try {
+      await access(knownHostsPath, constants.W_OK);
+      console.log(`[SSH Setup] Verified known_hosts file is writable`);
+    } catch (error) {
+      console.error(`[SSH Setup] Known_hosts file is NOT writable:`, error);
+      console.error(`[SSH Setup] This will cause SSH connection failures with StrictHostKeyChecking=accept-new.`);
+      console.error(`[SSH Setup] Solutions:`);
+      console.error(`[SSH Setup]   1. Set SSH_STRICT_HOST_KEY_CHECKING=no (disables host key verification)`);
+      console.error(`[SSH Setup]   2. Set SSH_KNOWN_HOSTS_PATH=/dev/null (writes go nowhere)`);
+      console.error(`[SSH Setup]   3. Fix file permissions: chmod 666 ${knownHostsPath}`);
+    }
+    
+  } catch (error) {
+    console.error(`[SSH Setup] Failed to ensure known_hosts file exists:`, error);
+    console.error(`[SSH Setup] SSH connections may fail. Recommended: Set SSH_KNOWN_HOSTS_PATH=/dev/null`);
+    // Don't fail startup - but log the error prominently
+  }
+}
 
 async function start(): Promise<void> {
   try {
+    // Ensure SSH known_hosts file exists before any SSH operations
+    await ensureSshKnownHostsFileExists();
+    
     await refreshAdminRoleBindingsCache();
     await bootstrapAdminRoleBindingsFromEnv(appConfig.ADMIN_API_TOKEN);
     await startDeploymentQueueWorker(app.log);

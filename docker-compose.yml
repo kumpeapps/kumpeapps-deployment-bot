@@ -5,7 +5,7 @@ services:
     env_file:
       - .env
     volumes:
-      - ./.devcontainer/ssh:/workspaces/kumpeapps-deployment-bot/.devcontainer/ssh:ro
+      - ./.devcontainer/ssh:/workspaces/kumpeapps-deployment-bot/.devcontainer/ssh
     ports:
       - "3000:3000"
     depends_on:

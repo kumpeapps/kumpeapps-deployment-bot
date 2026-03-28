@@ -3,6 +3,7 @@ import { Webhooks } from "@octokit/webhooks";
 import { appConfig } from "../config.js";
 import { prisma } from "../db.js";
 import { enqueueDeploymentJob } from "../services/deployment-queue.js";
+import { cleanupRepository } from "../services/repository-cleanup.js";
 import { branchFromRef, matchesDeployRules, getDeployLabels, matchesReleaseRules } from "../services/deploy-rules.js";
 import { syncRepositoryDeploymentConfigs } from "../services/github-config-sync.js";
 import { DeploymentConfigSchema } from "../schemas/deployment-config.js";
@@ -14,7 +15,7 @@ import {
 import { provisionRepositoryToken } from "../services/repository-tokens.js";
 import { provisionNebulaClients, deprovisionNebulaClients, revokeNebulaCertificate } from "../services/nebula-provisioning.js";
 import { initializeRepository } from "../services/repository-initialization.js";
-import { addRepositoryCollaborator, acceptRepositoryInvitation } from "../services/github-automation.js";
+import { addRepositoryCollaborator, acceptRepositoryInvitation, checkDirectoryExists, listInstallationRepositories, addGitHubComment } from "../services/github-automation.js";
 import { recordInvalidWebhookSignature } from "../services/webhook-security-health.js";
 import { processApprovalComment } from "../services/vm-approval.js";
 import { removeCaddyConfig } from "../services/ssh-deployer.js";
@@ -84,22 +85,75 @@ export async function registerWebhookRoutes(
   }) => Promise<void>;
 
   webhooks.on("push", async ({ payload }: { payload: any }) => {
-    if (!appConfig.AUTO_DEPLOY_ENABLED) {
-      app.log.info("Auto deploy skipped: AUTO_DEPLOY_ENABLED is false");
-      return;
-    }
-
     const fullName = payload.repository.full_name;
     const [owner, name] = fullName.split("/");
     const branch = branchFromRef(payload.ref);
 
     app.log.info(
       { fullName, branch, commitSha: payload.after },
-      "Processing push for auto-deployment"
+      "Processing push event"
     );
 
     if (!owner || !name) {
-      app.log.warn({ fullName }, "Skipping auto deploy due to malformed repository full name");
+      app.log.warn({ fullName }, "Skipping push event due to malformed repository full name");
+      return;
+    }
+
+    // Check if this push added .kumpeapps-deploy-bot directory
+    // This triggers initialization for repos that weren't auto-initialized on install
+    try {
+      const hasConfigDir = await checkDirectoryExists({
+        repositoryOwner: owner,
+        repositoryName: name,
+        directoryPath: ".kumpeapps-deploy-bot",
+        ref: payload.after
+      });
+
+      if (hasConfigDir) {
+        app.log.info(
+          { fullName, commitSha: payload.after },
+          "Detected .kumpeapps-deploy-bot directory - checking initialization status"
+        );
+
+        const result = await initializeRepository({
+          repositoryOwner: owner,
+          repositoryName: name
+        });
+
+        if (result.success && result.issueNumber) {
+          app.log.info(
+            { 
+              owner, 
+              repo: name,
+              issueNumber: result.issueNumber,
+              prNumber: result.prNumber
+            },
+            "Repository initialized successfully via push event"
+          );
+          // Don't continue with auto-deploy on first initialization push
+          return;
+        } else if (result.error === "Repository already initialized") {
+          app.log.info(
+            { owner, repo: name },
+            "Repository already initialized - continuing with normal push processing"
+          );
+        } else {
+          app.log.error(
+            { owner, repo: name, error: result.error },
+            "Failed to initialize repository via push event"
+          );
+        }
+      }
+    } catch (error) {
+      app.log.warn(
+        { error, fullName },
+        "Error checking for .kumpeapps-deploy-bot directory; continuing with normal push processing"
+      );
+    }
+
+    // Continue with normal auto-deploy processing
+    if (!appConfig.AUTO_DEPLOY_ENABLED) {
+      app.log.info("Auto deploy skipped: AUTO_DEPLOY_ENABLED is false");
       return;
     }
 
@@ -308,7 +362,7 @@ export async function registerWebhookRoutes(
   });
 
   webhooks.on("installation.created", async ({ payload }: { payload: any }) => {
-    const repositories = (payload.repositories ?? []).map((repo: any) => {
+    let repositories = (payload.repositories ?? []).map((repo: any) => {
       const names = splitFullName(repo.full_name);
       return {
         owner: names.owner,
@@ -316,6 +370,29 @@ export async function registerWebhookRoutes(
         defaultBranch: "main"
       };
     });
+
+    // If installation has "all repositories" access, fetch the complete list
+    if (payload.installation.repository_selection === "all" && repositories.length === 0) {
+      try {
+        app.log.info(
+          { installationId: payload.installation.id },
+          "Installation created with 'all repositories' access - fetching repository list"
+        );
+        repositories = await listInstallationRepositories({
+          installationId: BigInt(payload.installation.id)
+        });
+        app.log.info(
+          { installationId: payload.installation.id, count: repositories.length },
+          "Fetched repositories for installation"
+        );
+      } catch (error) {
+        app.log.error(
+          { installationId: payload.installation.id, error },
+          "Failed to fetch repositories for installation"
+        );
+        // Continue with empty array - repositories can be added later via installation_repositories.added
+      }
+    }
 
     await upsertInstallation({
       installationId: BigInt(payload.installation.id),
@@ -325,6 +402,7 @@ export async function registerWebhookRoutes(
     });
 
     // Add kumpeapps-bot-deploy as collaborator to each repository
+    // This allows issues to be assigned to the bot for manual initialization
     for (const repo of repositories) {
       try {
         await addRepositoryCollaborator({
@@ -357,35 +435,49 @@ export async function registerWebhookRoutes(
       }
     }
 
-    // Initialize each repository with automated setup
-    for (const repo of repositories) {
-      const result = await initializeRepository({
-        repositoryOwner: repo.owner,
-        repositoryName: repo.name
-      });
-
-      if (result.success) {
-        app.log.info(
-          { 
-            owner: repo.owner, 
-            repo: repo.name,
-            issueNumber: result.issueNumber,
-            prNumber: result.prNumber
-          },
-          "Repository initialized successfully"
-        );
-      } else {
-        app.log.error(
-          { owner: repo.owner, repo: repo.name, error: result.error },
-          "Failed to initialize repository"
-        );
-      }
-    }
+    // NOTE: Initialization is now triggered by:
+    // 1. Assigning an issue to kumpeapps-bot-deploy and running `/bot initialize` command, OR
+    // 2. Creating a .kumpeapps-deploy-bot directory in the repo
+    // This allows org-wide installation without affecting all repos automatically.
+    app.log.info(
+      { repositories: repositories.map((r: { owner: string; name: string }) => `${r.owner}/${r.name}`) },
+      "Installation created - awaiting initialization trigger (bot command or config directory)"
+    );
   });
 
   webhooks.on("installation.deleted", async ({ payload }: { payload: any }) => {
     const installationId = BigInt(payload.installation.id);
+    
+    app.log.info(
+      { installationId: String(installationId) },
+      "Installation deleted - cleaning up all repository resources"
+    );
+    
+    // Get all repositories for this installation before marking inactive
+    const repositories = await prisma.repository.findMany({
+      where: { installationId }
+    });
+    
+    // Clean up each repository
+    for (const repo of repositories) {
+      await cleanupRepository({
+        owner: repo.owner,
+        name: repo.name,
+        reason: "GitHub App uninstalled",
+        logger: app.log
+      });
+    }
+    
+    // Now mark installation as inactive and delete the installation record
     await markInstallationInactive(installationId);
+    
+    app.log.info(
+      { 
+        installationId: String(installationId),
+        repositoriesProcessed: repositories.length
+      },
+      "Installation cleanup completed"
+    );
   });
 
   webhooks.on("installation_repositories.added", async ({ payload }: { payload: any }) => {
@@ -405,7 +497,7 @@ export async function registerWebhookRoutes(
       repositoriesRemoved: []
     });
 
-    // Add kumpeapps-bot-deploy as collaborator to enable PR/issue management
+    // Add kumpeapps-bot-deploy as collaborator to enable issue assignment
     for (const repo of repositoriesAdded) {
       try {
         await addRepositoryCollaborator({
@@ -433,35 +525,19 @@ export async function registerWebhookRoutes(
       } catch (error) {
         app.log.warn(
           { owner: repo.owner, repo: repo.name, error: String(error) },
-          "Failed to add kumpeapps-bot-deploy as collaborator - continuing initialization"
+          "Failed to add kumpeapps-bot-deploy as collaborator - continuing"
         );
       }
     }
 
-    // Initialize each newly added repository with automated setup
-    for (const repo of repositoriesAdded) {
-      const result = await initializeRepository({
-        repositoryOwner: repo.owner,
-        repositoryName: repo.name
-      });
-
-      if (result.success) {
-        app.log.info(
-          { 
-            owner: repo.owner, 
-            repo: repo.name,
-            issueNumber: result.issueNumber,
-            prNumber: result.prNumber
-          },
-          "Repository initialized successfully"
-        );
-      } else {
-        app.log.error(
-          { owner: repo.owner, repo: repo.name, error: result.error },
-          "Failed to initialize repository"
-        );
-      }
-    }
+    // NOTE: Initialization is now triggered by:
+    // 1. Assigning an issue to kumpeapps-bot-deploy and running `/bot initialize` command, OR
+    // 2. Creating a .kumpeapps-deploy-bot directory in the repo
+    // This allows org-wide installation without affecting all repos automatically.
+    app.log.info(
+      { repositories: repositoriesAdded.map((r: { owner: string; name: string }) => `${r.owner}/${r.name}`) },
+      "Repositories added to installation - awaiting initialization trigger"
+    );
   });
 
   webhooks.on("installation_repositories.removed", async ({ payload }: { payload: any }) => {
@@ -481,37 +557,32 @@ export async function registerWebhookRoutes(
       repositoriesRemoved
     });
 
-    // Deprovision Nebula VPN clients and clean up secrets for removed repositories
+    // Clean up each removed repository
     for (const repo of repositoriesRemoved) {
-      // Deprovision Nebula clients
-      const nebulaResults = await deprovisionNebulaClients({
-        repositoryOwner: repo.owner,
-        repositoryName: repo.name
+      await cleanupRepository({
+        owner: repo.owner,
+        name: repo.name,
+        reason: "app uninstalled from repository",
+        logger: app.log
       });
-
-      for (const envResult of nebulaResults) {
-        if (envResult.success) {
-          app.log.info(
-            { 
-              owner: repo.owner, 
-              repo: repo.name, 
-              environment: envResult.environment
-            },
-            "Nebula VPN client deprovisioned"
-          );
-        } else {
-          app.log.warn(
-            { 
-              owner: repo.owner, 
-              repo: repo.name, 
-              environment: envResult.environment,
-              error: envResult.error
-            },
-            "Failed to deprovision Nebula VPN client"
-          );
-        }
-      }
     }
+  });
+
+  webhooks.on("repository.deleted", async ({ payload }: { payload: any }) => {
+    const fullName = payload.repository.full_name;
+    const names = splitFullName(fullName);
+
+    app.log.info(
+      { repositoryFullName: fullName },
+      "Repository deleted - cleaning up resources"
+    );
+
+    await cleanupRepository({
+      owner: names.owner,
+      name: names.name,
+      reason: "repository deleted from GitHub",
+      logger: app.log
+    });
   });
 
   webhooks.on("issue_comment", async ({ payload }: { payload: any }) => {
@@ -720,6 +791,331 @@ export async function registerWebhookRoutes(
         { error, repositoryFullName, issueNumber },
         "Failed to process VM approval comment"
       );
+    }
+  });
+
+  webhooks.on("issues.assigned", async ({ payload }: { payload: any }) => {
+    // Check if the assignee is kumpeapps-bot-deploy
+    if (payload.assignee?.login !== "kumpeapps-bot-deploy") {
+      return;
+    }
+
+    const repositoryFullName = payload.repository.full_name;
+    const [owner, name] = repositoryFullName.split('/');
+    const issueNumber = payload.issue.number;
+
+    app.log.info(
+      { repositoryFullName, issueNumber },
+      "Issue assigned to kumpeapps-bot-deploy - posting command help"
+    );
+
+    // Check repository state to determine available commands
+    const repository = await prisma.repository.findUnique({
+      where: {
+        owner_name: { owner, name }
+      }
+    }) as any;
+
+    const isInitialized = repository?.apiToken;
+
+    // Get VMs for this repo
+    const vms = isInitialized ? await prisma.vm.findMany({
+      where: { repositoryId: repository.id },
+      select: {
+        environment: true,
+        vmHostname: true
+      }
+    }) : [];
+
+    const hasVms = vms.length > 0;
+    const vmEnvironments = [...new Set(vms.map(vm => vm.environment))];
+
+    // Build command list based on state
+    const commands: string[] = [];
+
+    if (!isInitialized) {
+      commands.push("- `/bot initialize` - Initialize this repository for deployments");
+    } else {
+      commands.push("- `/bot redeploy <environment>` - Redeploy to specified environment (dev, stage, or prod)");
+      commands.push("- `/bot uninitialize` - Remove bot configuration and clean up resources");
+      
+      if (hasVms) {
+        commands.push("- `/bot delete-vm <environment>` - Delete VM for specified environment (" + vmEnvironments.join(', ') + ")");
+      }
+    }
+
+    const commentBody = `👋 Hi! I'm here to help with deployments.
+
+**Repository Status:** ${isInitialized ? '✅ Initialized' : '❌ Not Initialized'}
+${hasVms ? `**Active VMs:** ${vmEnvironments.join(', ')}` : ''}
+
+**Available Commands:**
+${commands.join('\n')}
+
+Reply to this issue with a command to get started!`;
+
+    try {
+      await addGitHubComment({
+        repositoryOwner: owner,
+        repositoryName: name,
+        issueNumber,
+        body: commentBody
+      });
+
+      app.log.info(
+        { owner, repo: name, issueNumber },
+        "Posted command help comment on issue"
+      );
+    } catch (error) {
+      app.log.error(
+        { owner, repo: name, issueNumber, error },
+        "Failed to post command help comment"
+      );
+    }
+  });
+
+  webhooks.on("issue_comment.created", async ({ payload }: { payload: any }) => {
+    // Only process comments on issues (not PRs)
+    if (payload.issue.pull_request) {
+      return;
+    }
+
+    const comment = payload.comment.body as string;
+    const repositoryFullName = payload.repository.full_name;
+    const [owner, name] = repositoryFullName.split('/');
+    const issueNumber = payload.issue.number;
+    const commentAuthor = payload.comment.user.login;
+
+    // Only process commands that start with /bot
+    if (!comment.trim().startsWith('/bot')) {
+      return;
+    }
+
+    app.log.info(
+      { repositoryFullName, issueNumber, commentAuthor, comment },
+      "Processing bot command from issue comment"
+    );
+
+    // Parse command
+    const commandMatch = comment.trim().match(/^\/bot\s+(\w+)(?:\s+(\w+))?/);
+    if (!commandMatch) {
+      await addGitHubComment({
+        repositoryOwner: owner,
+        repositoryName: name,
+        issueNumber,
+        body: "❌ Invalid command format. Use `/bot <command>` (e.g., `/bot initialize`)"
+      });
+      return;
+    }
+
+    const command = commandMatch[1].toLowerCase();
+    const arg = commandMatch[2]?.toLowerCase();
+
+    // Check repository state
+    const repository = await prisma.repository.findUnique({
+      where: {
+        owner_name: { owner, name }
+      }
+    }) as any;
+
+    const isInitialized = repository?.apiToken;
+
+    // Handle commands based on state
+    try {
+      switch (command) {
+        case 'initialize':
+          if (isInitialized) {
+            await addGitHubComment({
+              repositoryOwner: owner,
+              repositoryName: name,
+              issueNumber,
+              body: "⚠️ Repository is already initialized. Use `/bot uninitialize` first if you want to reinitialize."
+            });
+            return;
+          }
+
+          await addGitHubComment({
+            repositoryOwner: owner,
+            repositoryName: name,
+            issueNumber,
+            body: "🚀 Starting repository initialization..."
+          });
+
+          const initResult = await initializeRepository({
+            repositoryOwner: owner,
+            repositoryName: name,
+            existingIssue: {
+              number: issueNumber,
+              html_url: payload.issue.html_url,
+              node_id: payload.issue.node_id
+            }
+          });
+
+          if (initResult.success) {
+            await addGitHubComment({
+              repositoryOwner: owner,
+              repositoryName: name,
+              issueNumber,
+              body: `✅ Repository initialized successfully!\n\n- Issue: #${initResult.issueNumber}\n- PR: #${initResult.prNumber}\n\nCheck the PR for configuration templates.`
+            });
+          } else {
+            await addGitHubComment({
+              repositoryOwner: owner,
+              repositoryName: name,
+              issueNumber,
+              body: `❌ Initialization failed: ${initResult.error}`
+            });
+          }
+          break;
+
+        case 'redeploy':
+          if (!isInitialized) {
+            await addGitHubComment({
+              repositoryOwner: owner,
+              repositoryName: name,
+              issueNumber,
+              body: "❌ Repository not initialized. Use `/bot initialize` first."
+            });
+            return;
+          }
+
+          if (!arg || !['dev', 'stage', 'prod'].includes(arg)) {
+            await addGitHubComment({
+              repositoryOwner: owner,
+              repositoryName: name,
+              issueNumber,
+              body: "❌ Please specify environment: `/bot redeploy <dev|stage|prod>`"
+            });
+            return;
+          }
+
+          await addGitHubComment({
+            repositoryOwner: owner,
+            repositoryName: name,
+            issueNumber,
+            body: `🔄 Triggering redeploy to **${arg}** environment...`
+          });
+
+          // Trigger deployment via deployment-runner
+          // Note: This would need proper implementation with deployment queue
+          await addGitHubComment({
+            repositoryOwner: owner,
+            repositoryName: name,
+            issueNumber,
+            body: `⚠️ Redeploy command is not yet fully implemented. Please use GitHub labels or push to trigger deployments.`
+          });
+          break;
+
+        case 'uninitialize':
+          if (!isInitialized) {
+            await addGitHubComment({
+              repositoryOwner: owner,
+              repositoryName: name,
+              issueNumber,
+              body: "⚠️ Repository is not initialized."
+            });
+            return;
+          }
+
+          await addGitHubComment({
+            repositoryOwner: owner,
+            repositoryName: name,
+            issueNumber,
+            body: "🧹 Starting cleanup..."
+          });
+
+          const cleanupResult = await cleanupRepository({
+            owner,
+            name,
+            reason: "Manual uninitialize via bot command",
+            logger: app.log
+          });
+
+          if (cleanupResult.repository) {
+            await addGitHubComment({
+              repositoryOwner: owner,
+              repositoryName: name,
+              issueNumber,
+              body: `✅ Repository uninitialized successfully!\n\n- Configs deleted: ${cleanupResult.deletedConfigs}\n- Secrets deleted: ${cleanupResult.deletedSecrets}\n- Secrets/variables cleaned: ${cleanupResult.secretsCleanup.deleted}\n- Nebula clients deprovisioned: ${cleanupResult.nebulaResults.filter(r => r.success).length}`
+            });
+          } else {
+            await addGitHubComment({
+              repositoryOwner: owner,
+              repositoryName: name,
+              issueNumber,
+              body: "❌ Repository not found in database."
+            });
+          }
+          break;
+
+        case 'delete-vm':
+          if (!isInitialized) {
+            await addGitHubComment({
+              repositoryOwner: owner,
+              repositoryName: name,
+              issueNumber,
+              body: "❌ Repository not initialized."
+            });
+            return;
+          }
+
+          if (!arg || !['dev', 'stage', 'prod'].includes(arg)) {
+            await addGitHubComment({
+              repositoryOwner: owner,
+              repositoryName: name,
+              issueNumber,
+              body: "❌ Please specify environment: `/bot delete-vm <dev|stage|prod>`"
+            });
+            return;
+          }
+
+          const vm = await prisma.vm.findFirst({
+            where: {
+              repositoryId: repository.id,
+              environment: arg
+            }
+          });
+
+          if (!vm) {
+            await addGitHubComment({
+              repositoryOwner: owner,
+              repositoryName: name,
+              issueNumber,
+              body: `❌ No VM found for **${arg}** environment.`
+            });
+            return;
+          }
+
+          await addGitHubComment({
+            repositoryOwner: owner,
+            repositoryName: name,
+            issueNumber,
+            body: `⚠️ VM deletion via bot command is not yet implemented. Please use the Virtualizor admin panel or API directly.`
+          });
+          break;
+
+        default:
+          await addGitHubComment({
+            repositoryOwner: owner,
+            repositoryName: name,
+            issueNumber,
+            body: `❌ Unknown command: \`${command}\`. Available commands: initialize, redeploy, uninitialize, delete-vm`
+          });
+      }
+    } catch (error) {
+      app.log.error(
+        { owner, repo: name, issueNumber, command, error },
+        "Failed to execute bot command"
+      );
+
+      await addGitHubComment({
+        repositoryOwner: owner,
+        repositoryName: name,
+        issueNumber,
+        body: `❌ Command failed: ${error instanceof Error ? error.message : 'Unknown error'}`
+      }).catch(() => {
+        // Best effort - don't throw if comment fails
+      });
     }
   });
 
@@ -1204,8 +1600,8 @@ export async function registerWebhookRoutes(
         return reply.send({ acknowledged: true, found: false });
       }
 
-      const vmMetadata = vm.metadata as { environment?: string; ip?: string } | null;
-      const environment = vmMetadata?.environment;
+      // Environment is stored in vm.environment column, not in metadata JSON
+      const environment = vm.environment;
       const deletionResult = {
         vmId: vm.id,
         repository: `${vm.repository.owner}/${vm.repository.name}`,
@@ -1277,7 +1673,7 @@ export async function registerWebhookRoutes(
           deletionResult.caddyCleanup = `Error: ${caddyError instanceof Error ? caddyError.message : "Unknown error"}`;
         }
       } else {
-        app.log.warn({ vmId: vm.id }, "VM metadata missing environment, skipping Caddy cleanup");
+        app.log.warn({ vmId: vm.id }, "VM missing environment field, skipping Caddy cleanup");
       }
 
       // Revoke Nebula certificate for this environment
@@ -1296,7 +1692,7 @@ export async function registerWebhookRoutes(
                 environment,
                 repository: `${vm.repository.owner}/${vm.repository.name}`
               },
-              "Nebula certificate revoked for deleted VM"
+              "Nebula certificate revoked for deleted VM (client retained for reuse)"
             );
           } else {
             app.log.warn(
@@ -1305,7 +1701,7 @@ export async function registerWebhookRoutes(
             );
           }
         } catch (nebulaError) {
-          // Log but don't fail the VM deletion if Nebula cert revocation fails
+          // Log but don't fail the VM deletion if Nebula certificate revocation fails
           app.log.error(
             { error: nebulaError, vmId: vm.id, environment },
             "Failed to revoke Nebula certificate, continuing with VM deletion"

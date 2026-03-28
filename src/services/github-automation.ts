@@ -10,7 +10,7 @@
  */
 
 import { appConfig } from "../config.js";
-import { getGitHubToken } from "./github-app-auth.js";
+import { getGitHubToken, getInstallationTokenById } from "./github-app-auth.js";
 import { recordAuditEvent } from "./audit.js";
 
 interface CreateIssueInput {
@@ -978,3 +978,178 @@ export async function acceptRepositoryInvitation(input: {
     return false;
   }
 }
+
+/**
+ * Remove a collaborator from a repository using the bot user token
+ * Used during repository cleanup to remove kumpeapps-bot-deploy from collaborators list
+ */
+export async function removeRepositoryCollaborator(input: {
+  repositoryOwner: string;
+  repositoryName: string;
+  username: string;
+}): Promise<{ success: boolean; error?: string }> {
+  const { BOT_USER_TOKEN } = appConfig;
+
+  if (!BOT_USER_TOKEN) {
+    return {
+      success: false,
+      error: "BOT_USER_TOKEN not configured"
+    };
+  }
+
+  try {
+    const url = `https://api.github.com/repos/${encodeURIComponent(input.repositoryOwner)}/${encodeURIComponent(input.repositoryName)}/collaborators/${encodeURIComponent(input.username)}`;
+
+    const response = await fetch(url, {
+      method: "DELETE",
+      headers: {
+        "Accept": "application/vnd.github+json",
+        "Authorization": `Bearer ${BOT_USER_TOKEN}`,
+        "User-Agent": "kumpeapps-deployment-bot"
+      },
+      signal: AbortSignal.timeout(15000)
+    });
+
+    // GitHub returns 204 on success, 404 if not a collaborator
+    if (response.ok || response.status === 404) {
+      await recordAuditEvent({
+        actorType: "system",
+        actorId: "github-automation",
+        action: "github.collaborator.removed",
+        resourceType: "github_repository",
+        resourceId: `${input.repositoryOwner}/${input.repositoryName}`,
+        payload: {
+          repositoryOwner: input.repositoryOwner,
+          repositoryName: input.repositoryName,
+          username: input.username,
+          statusCode: response.status
+        }
+      });
+
+      return { success: true };
+    }
+
+    const errorText = await response.text();
+    return {
+      success: false,
+      error: `HTTP ${response.status} - ${errorText}`
+    };
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : "Unknown error";
+    return {
+      success: false,
+      error: errorMessage
+    };
+  }
+}
+
+/**
+ * Check if a directory exists in a GitHub repository
+ * @param input Repository details and directory path
+ * @returns true if directory exists, false otherwise
+ */
+export async function checkDirectoryExists(input: {
+  repositoryOwner: string;
+  repositoryName: string;
+  directoryPath: string;
+  ref?: string;
+}): Promise<boolean> {
+  try {
+    const installationToken = await getGitHubToken(
+      input.repositoryOwner,
+      input.repositoryName
+    );
+
+    const ref = input.ref ?? "HEAD";
+    const url = `https://api.github.com/repos/${input.repositoryOwner}/${input.repositoryName}/contents/${input.directoryPath}?ref=${ref}`;
+
+    const response = await fetch(url, {
+      method: "GET",
+      headers: {
+        "Accept": "application/vnd.github+json",
+        "Authorization": `Bearer ${installationToken}`,
+        "X-GitHub-Api-Version": "2022-11-28",
+        "User-Agent": "kumpeapps-deployment-bot"
+      },
+      signal: AbortSignal.timeout(15000)
+    });
+
+    // 200 = directory exists
+    // 404 = directory doesn't exist
+    return response.ok;
+  } catch (error) {
+    console.warn(`Error checking directory existence:`, error);
+    return false;
+  }
+}
+
+/**
+ * List all repositories accessible to a GitHub App installation
+ * Used when app is installed with "All repositories" access
+ */
+export async function listInstallationRepositories(input: {
+  installationId: bigint;
+}): Promise<Array<{ owner: string; name: string; defaultBranch: string }>> {
+  const installationToken = await getInstallationTokenById(input.installationId);
+  if (!installationToken) {
+    throw new Error("No installation token available");
+  }
+
+  const repositories: Array<{ owner: string; name: string; defaultBranch: string }> = [];
+  let page = 1;
+  const perPage = 100;
+
+  try {
+    while (true) {
+      const url = `https://api.github.com/installation/repositories?per_page=${perPage}&page=${page}`;
+
+      const response = await fetch(url, {
+        method: "GET",
+        headers: {
+          "Accept": "application/vnd.github+json",
+          "Authorization": `Bearer ${installationToken}`,
+          "X-GitHub-Api-Version": "2022-11-28",
+          "User-Agent": "kumpeapps-deployment-bot"
+        },
+        signal: AbortSignal.timeout(30000)
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`Failed to list installation repositories: HTTP ${response.status} - ${errorText}`);
+      }
+
+      const data = await response.json() as {
+        total_count: number;
+        repositories: Array<{
+          full_name: string;
+          default_branch: string;
+        }>;
+      };
+
+      for (const repo of data.repositories) {
+        const [owner, name] = repo.full_name.split("/");
+        if (owner && name) {
+          repositories.push({
+            owner,
+            name,
+            defaultBranch: repo.default_branch || "main"
+          });
+        }
+      }
+
+      // Check if we've fetched all repositories
+      if (data.repositories.length < perPage) {
+        break;
+      }
+
+      page++;
+    }
+
+    return repositories;
+  } catch (error) {
+    console.error("Error listing installation repositories:", error);
+    throw error;
+  }
+}
+

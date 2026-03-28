@@ -6,7 +6,8 @@ import { prisma } from "../db.js";
 import { recordAuditEvent } from "./audit.js";
 import {
   type DeploymentConfig,
-  validateDeploymentPolicy
+  validateDeploymentPolicy,
+  validateCaddyfileDomains
 } from "../schemas/deployment-config.js";
 import { compensateComposeOnVm, deployCaddyConfig, deployComposeToVm } from "./ssh-deployer.js";
 import { resolveRepositoryEnvValues } from "./repository-secrets.js";
@@ -17,6 +18,7 @@ import { buildVmHostname, checkVmApprovalStatus, createVmApprovalRequest } from 
 import { getGitHubToken } from "./github-app-auth.js";
 import { syncAuthorizedAdminsToVm } from "./vm-user-management.js";
 import { fetchFileFromGitHub } from "./github-automation.js";
+import { getNebulaIpAddress } from "./nebula-provisioning.js";
 
 /**
  * Custom error for VM approval pending state.
@@ -659,7 +661,10 @@ export async function executeDeployment(input: ExecuteDeploymentInput): Promise<
         deployment.id,
         "vm.sync_authorized_admins",
         async () => {
-          const githubToken = await getGitHubToken(input.repositoryOwner, input.repositoryName);
+          // For org team operations, prefer static token if available (installation tokens may lack org permissions)
+          const githubToken = await getGitHubToken(input.repositoryOwner, input.repositoryName, { 
+            preferStaticToken: true 
+          });
           
           if (!githubToken) {
             throw new Error(
@@ -720,73 +725,113 @@ export async function executeDeployment(input: ExecuteDeploymentInput): Promise<
 
     vmComposeDeployed = true;
 
-    // Deploy Caddy config and capture the deployed file names
+    // Deploy Caddy config from Caddyfile in repository
     let deployedCaddyFiles: string[] = [];
-    await runStep(
-      deployment.id,
-      "caddy.deploy_config",
-      async () => {
-        // Resolve and process all Caddy config files
-        const processedCaddyConfig: Record<string, string> = {};
-        
-        // Get Nebula IP from secrets (environment-specific)
-        const nebulaIpSecretName = `${input.environment.toUpperCase()}_NEBULA_IP`;
-        const nebulaIp = resolvedSecrets.envValues[nebulaIpSecretName];
-        
-        for (const [fileName, content] of Object.entries(input.config.caddy)) {
-          // Resolve file content first (inline or file reference)
-          let resolved = await resolveFileContent({
-            content,
-            configPath: input.configPath,
+    let caddyfileContent: string | null = null;
+
+    // Try to fetch Caddyfile from repo (same directory as config)
+    // Note: Using lowercase 'caddyfile' for Linux compatibility
+    const configDir = input.configPath.substring(0, input.configPath.lastIndexOf('/'));
+    const caddyfilePath = `${configDir}/caddyfile`;
+    
+    try {
+      caddyfileContent = await fetchFileFromGitHub({
+        repositoryOwner: input.repositoryOwner,
+        repositoryName: input.repositoryName,
+        path: caddyfilePath,
+        ref: input.commitSha
+      });
+    } catch (error) {
+      // Caddyfile not found - skip gracefully
+      console.log(`[Deployment Runner] No caddyfile found at ${caddyfilePath}, skipping Caddy deployment`);
+      caddyfileContent = null;
+    }
+
+    if (caddyfileContent) {
+      await runStep(
+        deployment.id,
+        "caddy.deploy_config",
+        async () => {
+          // Get Nebula IP from secrets (environment-specific)
+          const nebulaIpSecretName = `${input.environment.toUpperCase()}_NEBULA_IP`;
+          let nebulaIp: string | null | undefined = resolvedSecrets.envValues[nebulaIpSecretName];
+          
+          // Fallback: Query Managed Nebula API if secret doesn't exist
+          if (!nebulaIp) {
+            console.log(`[Deployment Runner] Secret ${nebulaIpSecretName} not found, querying Managed Nebula API...`);
+            const apiResult = await getNebulaIpAddress({
+              repositoryOwner: input.repositoryOwner,
+              repositoryName: input.repositoryName,
+              environment: input.environment
+            });
+            
+            if (apiResult) {
+              nebulaIp = apiResult;
+              console.log(`[Deployment Runner] Retrieved Nebula IP from API: ${nebulaIp}`);
+            } else {
+              console.log(`[Deployment Runner] No Nebula IP found in API either`);
+            }
+          }
+
+          // Validate domains in Caddyfile
+          const approvedDomains = user.approvedDomains.map((item: { domain: string }) => item.domain);
+          const domainErrors = validateCaddyfileDomains({
+            caddyfileContent,
+            configDomains: input.config.domains,
+            approvedDomains
+          });
+
+          if (domainErrors.length > 0) {
+            throw new Error(`Caddyfile domain validation failed: ${domainErrors.join("; ")}`);
+          }
+
+          // Process Caddyfile content (replace placeholders)
+          let processed = caddyfileContent;
+          processed = processed.replace(/\{\{vm\.ip\}\}/g, vmIp!);
+          if (nebulaIp) {
+            processed = processed.replace(/\{\{nebula\.ip\}\}/g, nebulaIp);
+          }
+
+          // Deploy as single file with naming convention: {owner}-{repo}-{env}.caddy (all lowercase)
+          const fileName = `${input.repositoryOwner.toLowerCase()}-${input.repositoryName.toLowerCase()}-${input.environment.toLowerCase()}.caddy`;
+          const processedCaddyConfig: Record<string, string> = {
+            [fileName]: processed
+          };
+          
+          const result = await deployCaddyConfig({
+            caddyHost: input.caddyHost,
+            caddyConfig: processedCaddyConfig,
+            domains: input.config.domains,
+            dryRun: input.dryRun,
+            sshUser: appConfig.CADDY_SSH_USER,
+            sshKeyPath: appConfig.CADDY_SSH_KEY_PATH,
+            sshPort: input.config.caddy_ssh_port ?? appConfig.CADDY_SSH_PORT,
+            remoteConfigDir: appConfig.CADDY_CONFIG_DIR,
+            validateCommand: appConfig.CADDY_VALIDATE_COMMAND,
+            reloadCommand: appConfig.CADDY_RELOAD_COMMAND,
             repositoryOwner: input.repositoryOwner,
             repositoryName: input.repositoryName,
-            commitSha: input.commitSha
+            environment: input.environment
           });
           
-          // Replace VM IP placeholder
-          resolved = resolved.replace(/\{\{vm\.ip\}\}/g, vmIp!);
-          
-          // Replace Nebula IP placeholder (if Nebula IP is available)
-          if (nebulaIp) {
-            resolved = resolved.replace(/\{\{nebula\.ip\}\}/g, nebulaIp);
-          }
-          
-          processedCaddyConfig[fileName] = resolved;
-        }
-        
-        const result = await deployCaddyConfig({
-          caddyHost: input.caddyHost,
-          caddyConfig: processedCaddyConfig,
-          domains: input.config.domains,
-          dryRun: input.dryRun,
-          sshUser: appConfig.CADDY_SSH_USER,
-          sshKeyPath: appConfig.CADDY_SSH_KEY_PATH,
-          sshPort: input.config.caddy_ssh_port ?? appConfig.CADDY_SSH_PORT,
-          remoteConfigDir: appConfig.CADDY_CONFIG_DIR,
-          validateCommand: appConfig.CADDY_VALIDATE_COMMAND,
-          reloadCommand: appConfig.CADDY_RELOAD_COMMAND,
-          repositoryOwner: input.repositoryOwner,
-          repositoryName: input.repositoryName,
-          environment: input.environment
-        });
-        
-        deployedCaddyFiles = result.deployedFiles;
-        return result;
-      },
-      (result) => result.message
-    );
+          deployedCaddyFiles = result.deployedFiles;
+          return result;
+        },
+        (result) => result.message
+      );
 
-    await runStep(deployment.id, "caddy.persist_release", async () => {
-      await prisma.caddyRelease.create({
-        data: {
-          deploymentId: deployment.id,
-          caddyHost: input.caddyHost,
-          configChecksum: createHash("sha256").update(JSON.stringify(input.config.caddy)).digest("hex"),
-          reloadStatus: "success",
-          deployedFiles: deployedCaddyFiles
-        }
+      await runStep(deployment.id, "caddy.persist_release", async () => {
+        await prisma.caddyRelease.create({
+          data: {
+            deploymentId: deployment.id,
+            caddyHost: input.caddyHost,
+            configChecksum: createHash("sha256").update(caddyfileContent).digest("hex"),
+            reloadStatus: "success",
+            deployedFiles: deployedCaddyFiles
+          }
+        });
       });
-    });
+    }
 
     await prisma.deployment.update({
       where: { id: deployment.id },

@@ -75,23 +75,22 @@ docker_compose: docker-compose.yml
 #         - DATABASE_URL=${DATABASE_URL}
 
 # Caddy reverse proxy configuration
-# Keys are arbitrary labels for organizing your configs
-# Values can be file references or inline Caddyfile blocks
+# Place a file named 'caddyfile' in the same directory as this config file
+# It will be deployed with the naming convention: {owner}-{repo}-{env}.caddy
 #
-# File reference example (recommended):
-# caddy:
-#   main: caddy
-#   api: api.caddy
+# All domains in your caddyfile must:
+#   1. Be declared in the 'domains' list above
+#   2. Be in your authorized domains list
 #
-# Inline example (backwards compatibility):
-# caddy:
-#   main: |
-#     {{DOMAIN}} {
-#       reverse_proxy {{nebula.ip}}:8080
-#     }
-
-caddy:
-  main: main.caddy
+# Available placeholders in caddyfile:
+#   {{vm.ip}} - VM IP address
+#   {{nebula.ip}} - Nebula VPN IP address (from environment-specific secret)
+#
+# caddyfile example:
+# {{DOMAIN}} {
+#   import ssl_defaults
+#   reverse_proxy {{nebula.ip}}:8080
+# }
 
 # Environment variable mappings: ENV_VAR_NAME: GITHUB_SECRET_NAME
 # These secrets should be synced via the sync-secrets workflow

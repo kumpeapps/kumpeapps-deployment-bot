@@ -2,9 +2,10 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
   DeploymentConfigSchema,
-  extractDomainsFromCaddy,
+  extractDomainsFromCaddyfile,
   isDomainApproved,
   validateDeploymentPolicy,
+  validateCaddyfileDomains,
   type DeploymentConfig
 } from "./deployment-config.js";
 
@@ -15,9 +16,6 @@ function makeConfig(overrides: Partial<DeploymentConfig> = {}): DeploymentConfig
     vm_hostname: "vm.example.com",
     domains: ["app.example.com"],
     docker_compose: "version: '3'",
-    caddy: {
-      "app.conf": "app.example.com { reverse_proxy localhost:8080 }"
-    },
     env_mappings: {},
     deploy_rules: [{ environment: "dev", branches: { include: ["main"], exclude: [] } }],
     ...overrides
@@ -50,26 +48,59 @@ describe("isDomainApproved", () => {
   });
 });
 
-describe("extractDomainsFromCaddy", () => {
-  it("extracts host from a simple caddy block", () => {
-    const domains = extractDomainsFromCaddy({
-      "app.conf": "app.example.com {\n  reverse_proxy localhost:8080\n}"
-    });
-    assert.ok(
-      domains.includes("app.example.com"),
-      `expected app.example.com in ${JSON.stringify(domains)}`
-    );
+describe("extractDomainsFromCaddyfile", () => {
+  it("extracts domain from simple Caddyfile", () => {
+    const content = "api.example.com {\n  reverse_proxy localhost:3000\n}";
+    const domains = extractDomainsFromCaddyfile(content);
+    assert.ok(domains.includes("api.example.com"));
   });
 
-  it("does not include localhost as a domain", () => {
-    const domains = extractDomainsFromCaddy({
-      "app.conf": "app.example.com {\n  reverse_proxy localhost:8080\n}"
-    });
-    assert.ok(!domains.some((d) => d.includes("localhost")));
+  it("extracts multiple domains from Caddyfile", () => {
+    const content = "app.example.com, www.example.com {\n  reverse_proxy localhost:8080\n}";
+    const domains = extractDomainsFromCaddyfile(content);
+    assert.ok(domains.includes("app.example.com"));
+    assert.ok(domains.includes("www.example.com"));
   });
 
-  it("returns empty array for empty caddy config", () => {
-    assert.deepEqual(extractDomainsFromCaddy({}), []);
+  it("extracts wildcard domains", () => {
+    const content = "*.example.com {\n  reverse_proxy localhost:8080\n}";
+    const domains = extractDomainsFromCaddyfile(content);
+    assert.ok(domains.includes("*.example.com"));
+  });
+
+  it("returns empty array for empty content", () => {
+    assert.deepEqual(extractDomainsFromCaddyfile(""), []);
+  });
+});
+
+describe("validateCaddyfileDomains", () => {
+  it("accepts when all Caddyfile domains are in config and authorized", () => {
+    const errors = validateCaddyfileDomains({
+      caddyfileContent: "app.example.com { reverse_proxy :8080 }",
+      configDomains: ["app.example.com"],
+      approvedDomains: ["*.example.com"]
+    });
+    assert.deepEqual(errors, []);
+  });
+
+  it("rejects when Caddyfile domain not in config", () => {
+    const errors = validateCaddyfileDomains({
+      caddyfileContent: "other.example.com { reverse_proxy :8080 }",
+      configDomains: ["app.example.com"],
+      approvedDomains: ["*.example.com"]
+    });
+    assert.ok(errors.length > 0);
+    assert.ok(errors[0].includes("not declared in config"));
+  });
+
+  it("rejects when Caddyfile domain not authorized", () => {
+    const errors = validateCaddyfileDomains({
+      caddyfileContent: "evil.com { reverse_proxy :8080 }",
+      configDomains: ["evil.com"],
+      approvedDomains: ["example.com"]
+    });
+    assert.ok(errors.length > 0);
+    assert.ok(errors[0].includes("not in authorized domains"));
   });
 });
 
@@ -81,7 +112,6 @@ describe("DeploymentConfigSchema", () => {
       vm_hostname: "vm.example.com",
       domains: ["app.example.com"],
       docker_compose: "version: '3'",
-      caddy: { "app.conf": "app.example.com { }" },
       env_mappings: { DB_PASS: "db-secret" },
       deploy_rules: [{ environment: "prod", branches: { include: ["main"], exclude: [] } }]
     };
@@ -96,7 +126,6 @@ describe("DeploymentConfigSchema", () => {
       vm_hostname: "vm.example.com",
       domains: ["app.example.com"],
       docker_compose: "version: '3'",
-      caddy: {},
       env_mappings: {},
       deploy_rules: [{ environment: "dev", branches: { include: [], exclude: [] } }]
     };
@@ -110,7 +139,6 @@ describe("DeploymentConfigSchema", () => {
       vm_hostname: "vm.example.com",
       domains: [],
       docker_compose: "version: '3'",
-      caddy: {},
       env_mappings: {},
       deploy_rules: [{ environment: "dev", branches: { include: [], exclude: [] } }]
     };
@@ -124,6 +152,7 @@ describe("validateDeploymentPolicy", () => {
       config: makeConfig(),
       expectedUsername: "testuser",
       approvedDomains: ["app.example.com"],
+      authorizedPlans: [],
       maxDomains: 5,
       maxVms: 3,
       currentVmCount: 0
@@ -136,6 +165,7 @@ describe("validateDeploymentPolicy", () => {
       config: makeConfig({ assigned_username: "alice" }),
       expectedUsername: "bob",
       approvedDomains: ["app.example.com"],
+      authorizedPlans: [],
       maxDomains: 5,
       maxVms: 3,
       currentVmCount: 0
@@ -147,6 +177,7 @@ describe("validateDeploymentPolicy", () => {
     const errors = validateDeploymentPolicy({
       config: makeConfig({ assigned_username: "alice" }),
       approvedDomains: ["app.example.com"],
+      authorizedPlans: [],
       maxDomains: 5,
       maxVms: 3,
       currentVmCount: 0
@@ -157,10 +188,10 @@ describe("validateDeploymentPolicy", () => {
   it("fails when domain count exceeds maxDomains", () => {
     const errors = validateDeploymentPolicy({
       config: makeConfig({
-        domains: ["a.example.com", "b.example.com"],
-        caddy: { "a.conf": "a.example.com { }", "b.conf": "b.example.com { }" }
+        domains: ["a.example.com", "b.example.com"]
       }),
       approvedDomains: ["a.example.com", "b.example.com"],
+      authorizedPlans: [],
       maxDomains: 1,
       maxVms: 3,
       currentVmCount: 0
@@ -172,6 +203,7 @@ describe("validateDeploymentPolicy", () => {
     const errors = validateDeploymentPolicy({
       config: makeConfig(),
       approvedDomains: ["app.example.com"],
+      authorizedPlans: [],
       maxDomains: 5,
       maxVms: 2,
       currentVmCount: 2
@@ -181,8 +213,9 @@ describe("validateDeploymentPolicy", () => {
 
   it("fails when a domain in config is not approved", () => {
     const errors = validateDeploymentPolicy({
-      config: makeConfig({ domains: ["evil.other.com"], caddy: { "e.conf": "evil.other.com { }" } }),
+      config: makeConfig({ domains: ["evil.other.com"] }),
       approvedDomains: ["app.example.com"],
+      authorizedPlans: [],
       maxDomains: 5,
       maxVms: 3,
       currentVmCount: 0
@@ -193,10 +226,10 @@ describe("validateDeploymentPolicy", () => {
   it("accepts wildcard-covered subdomains in approved domains", () => {
     const errors = validateDeploymentPolicy({
       config: makeConfig({
-        domains: ["sub.example.com"],
-        caddy: { "sub.conf": "sub.example.com { }" }
+        domains: ["sub.example.com"]
       }),
       approvedDomains: ["*.example.com"],
+      authorizedPlans: [],
       maxDomains: 5,
       maxVms: 3,
       currentVmCount: 0
@@ -208,6 +241,7 @@ describe("validateDeploymentPolicy", () => {
     const errors = validateDeploymentPolicy({
       config: makeConfig(),
       approvedDomains: ["app.example.com"],
+      authorizedPlans: [],
       maxDomains: 5,
       maxVms: 3,
       currentVmCount: 0
