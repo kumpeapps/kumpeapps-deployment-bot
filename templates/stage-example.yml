@@ -9,7 +9,7 @@ vm_hostname: stage-vm-myapp
 # Users will be created on the VM and added to bot-admin group
 authorized_admins:
   - github.repo.admins
-  - github.org.kumpeapps.team.vm_admins
+  - github.org.kumpeapps.team.vm-admins
 
 # Domains for reverse proxy
 domains:
@@ -32,22 +32,24 @@ docker_compose: docker-compose.yml
 #         NODE_ENV: staging
 #         LOG_LEVEL: info
 
-# Caddy configuration - reference file or inline
-# Files are deployed with unique names: {owner}-{env}-{repo}-{fileName}
-# Files without extensions get .caddy added automatically
-# Example: 'main: caddyfile' → 'kumpeapps-stage-myapp-main.caddy'
-caddy:
-  main: caddyfile
-
-# Inline example:
-# caddy:
-#   main: |
-#     myapp-stage.example.com, staging.myapp.example.com {
-#       import cloudns_dns
-#       import force_https
-#       reverse_proxy {{nebula.ip}}:8080
-#       log {
-#         output file /var/log/caddy/myapp-stage.log
+# Caddy configuration
+# Place a file named 'caddyfile' in the same directory as this config file
+# The caddyfile will be deployed as: {owner}-{repo}-{env}.caddy
+# Example: 'kumpeapps-myapp-stage.caddy'
+#
+# All domains in the caddyfile must be:
+#   1. Declared in the 'domains' list above
+#   2. In your authorized domains list
+#
+# caddyfile example:
+# {{DOMAIN}} {
+#   import ssl_defaults
+#   reverse_proxy {{nebula.ip}}:8080
+# }
+#
+# Available placeholders:
+#   {{vm.ip}} - VM IP address
+#   {{nebula.ip}} - Nebula VPN IP (from STAGE_NEBULA_IP secret)
 #       }
 #     }
 

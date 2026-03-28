@@ -50,8 +50,9 @@ runs:
           exit 0
         fi
         
-        SYNCED=0
-        FAILED=0
+        # Build JSON array of secrets
+        SECRETS_JSON="["
+        FIRST=true
         
         for SECRET_NAME in $SECRET_NAMES; do
           if [ "$SECRET_NAME" = "KUMPEAPPS_DEPLOY_BOT_TOKEN" ]; then
@@ -66,38 +67,58 @@ runs:
             continue
           fi
           
-          echo "Syncing ${SECRET_NAME}..."
+          # Escape JSON special characters in value
+          SECRET_VALUE_ESCAPED=$(echo "$SECRET_VALUE" | jq -Rs .)
           
-          response=$(curl -s -w "\n%{http_code}" \
-            --connect-timeout 10 \
-            --max-time 30 \
-            -X POST \
-            "${BOT_URL}/api/admin/repository-secrets/upsert" \
-            -H "Authorization: Bearer ${TOKEN}" \
-            -H "Content-Type: application/json" \
-            -d "{
-              \"repositoryOwner\": \"${REPO_OWNER}\",
-              \"repositoryName\": \"${REPO_NAME}\",
-              \"name\": \"${SECRET_NAME}\",
-              \"value\": \"${SECRET_VALUE}\"
-            }")
-          
-          http_code=$(echo "$response" | tail -n1)
-          
-          if [ "$http_code" = "200" ]; then
-            echo "✅ ${SECRET_NAME} synced"
-            SYNCED=$((SYNCED + 1))
+          if [ "$FIRST" = true ]; then
+            FIRST=false
           else
-            body=$(echo "$response" | head -n-1)
-            echo "::error::Failed to sync ${SECRET_NAME} (HTTP ${http_code}): ${body}"
-            FAILED=$((FAILED + 1))
+            SECRETS_JSON="${SECRETS_JSON},"
           fi
+          
+          SECRETS_JSON="${SECRETS_JSON}{\"name\":\"${SECRET_NAME}\",\"value\":${SECRET_VALUE_ESCAPED}}"
         done
         
-        echo "::endgroup::"
-        echo "::notice::Summary: ${SYNCED} secrets synced successfully ✅"
+        SECRETS_JSON="${SECRETS_JSON}]"
         
-        if [ $FAILED -gt 0 ]; then
-          echo "::error::${FAILED} secrets failed to sync"
+        if [ "$SECRETS_JSON" = "[]" ]; then
+          echo "::warning::No valid secrets found to sync"
+          exit 0
+        fi
+        
+        echo "Syncing secrets to deployment bot..."
+        
+        # Build request body
+        REQUEST_BODY=$(jq -n \
+          --arg owner "$REPO_OWNER" \
+          --arg name "$REPO_NAME" \
+          --argjson secrets "$SECRETS_JSON" \
+          '{repositoryOwner: $owner, repositoryName: $name, secrets: $secrets}')
+        
+        # Send bulk sync request
+        response=$(curl -s -w "\n%{http_code}" \
+          --connect-timeout 10 \
+          --max-time 60 \
+          -X POST \
+          "${BOT_URL}/api/admin/repository-secrets/sync" \
+          -H "Authorization: Bearer ${TOKEN}" \
+          -H "Content-Type: application/json" \
+          -d "$REQUEST_BODY")
+        
+        http_code=$(echo "$response" | tail -n1)
+        body=$(echo "$response" | head -n-1)
+        
+        if [ "$http_code" = "200" ]; then
+          synced=$(echo "$body" | jq -r '.synced // 0')
+          deleted=$(echo "$body" | jq -r '.deleted // 0')
+          echo "::notice::✅ Successfully synced ${synced} secrets"
+          if [ "$deleted" -gt 0 ]; then
+            echo "::notice::🗑️  Removed ${deleted} old secrets"
+          fi
+          echo "::endgroup::"
+          echo "::endgroup::"
+        else
+          echo "::endgroup::"
+          echo "::error::Failed to sync secrets (HTTP ${http_code}): ${body}"
           exit 1
         fi

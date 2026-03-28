@@ -11,6 +11,7 @@
 import { readFile } from "fs/promises";
 import { join } from "path";
 import { appConfig } from "../config.js";
+import { prisma } from "../db.js";
 import { recordAuditEvent } from "./audit.js";
 import { provisionNebulaClients } from "./nebula-provisioning.js";
 import { provisionRepositoryToken } from "./repository-tokens.js";
@@ -416,10 +417,49 @@ async function setupSyncSecretsWorkflowBranch(params: {
 export async function initializeRepository(input: {
   repositoryOwner: string;
   repositoryName: string;
+  existingIssue?: {
+    number: number;
+    html_url: string;
+    node_id: string;
+  };
 }): Promise<RepositoryInitializationResult> {
   try {
-    // Step 1: Create initialization issue
-    const issue = await createInitializationIssue(input);
+    // Check if already initialized by looking for apiToken (set during initialization)
+    const repository = await prisma.repository.findUnique({
+      where: {
+        owner_name: {
+          owner: input.repositoryOwner,
+          name: input.repositoryName
+        }
+      }
+    }) as any; // Type assertion needed until Prisma client is regenerated
+
+    if (repository?.apiToken) {
+      console.log(
+        `[Repository Initialization] Repository ${input.repositoryOwner}/${input.repositoryName} already initialized - skipping`
+      );
+
+      await recordAuditEvent({
+        actorType: "system",
+        actorId: "repo-initializer",
+        action: "repository.initialization.skipped",
+        resourceType: "repository",
+        resourceId: `${input.repositoryOwner}/${input.repositoryName}`,
+        payload: {
+          repositoryOwner: input.repositoryOwner,
+          repositoryName: input.repositoryName,
+          reason: "already_initialized"
+        }
+      });
+
+      return {
+        success: true,
+        error: "Repository already initialized"
+      };
+    }
+
+    // Step 1: Create or use existing initialization issue
+    const issue = input.existingIssue ?? await createInitializationIssue(input);
 
     // Step 2: Provision token and optionally Nebula clients
     await handleProvisioning({
@@ -455,7 +495,8 @@ export async function initializeRepository(input: {
         repositoryName: input.repositoryName,
         issueNumber: issue.number,
         prNumber: pr.number,
-        nebulaEnabled: appConfig.MANAGED_NEBULA_ENABLED
+        nebulaEnabled: appConfig.MANAGED_NEBULA_ENABLED,
+        existingIssue: !!input.existingIssue
       }
     });
 

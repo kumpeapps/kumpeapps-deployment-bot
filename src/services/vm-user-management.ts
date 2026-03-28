@@ -89,8 +89,19 @@ async function runCommand(command: string, args: string[]): Promise<{ stdout: st
   });
 
   if (lastError instanceof Error) {
+    const maybeStdout = "stdout" in lastError ? String((lastError as { stdout?: unknown }).stdout ?? "") : "";
     const maybeStderr = "stderr" in lastError ? String((lastError as { stderr?: unknown }).stderr ?? "") : "";
-    throw new Error(`${lastError.message}${maybeStderr ? ` | stderr: ${maybeStderr.trim()}` : ""}`);
+    
+    // Build detailed error message with both stdout and stderr
+    let errorMessage = lastError.message;
+    if (maybeStdout.trim()) {
+      errorMessage += ` | stdout: ${maybeStdout.trim()}`;
+    }
+    if (maybeStderr.trim()) {
+      errorMessage += ` | stderr: ${maybeStderr.trim()}`;
+    }
+    
+    throw new Error(errorMessage);
   }
 
   throw new Error("Command execution failed");
@@ -197,6 +208,10 @@ async function fetchGitHubAdmins(input: {
 
 /**
  * Fetch organization team members
+ * 
+ * Note: Requires GitHub App to have "Organization: Members" read permission
+ * or a personal access token with org:read scope. Repository-scoped tokens
+ * will return 404 even if the team exists.
  */
 async function fetchGitHubTeamMembers(input: {
   org: string;
@@ -204,6 +219,71 @@ async function fetchGitHubTeamMembers(input: {
   githubToken: string;
 }): Promise<string[]> {
   const members: string[] = [];
+  
+  console.log(`[VM User Management] Attempting to access team: ${input.org}/${input.teamSlug}`);
+  console.log(`[VM User Management] Using token: ${input.githubToken.substring(0, 10)}...${input.githubToken.substring(input.githubToken.length - 4)}`);
+  
+  // First, try to list all teams to help with debugging
+  try {
+    const teamsListResponse = await fetch(
+      `https://api.github.com/orgs/${input.org}/teams?per_page=100`,
+      {
+        headers: {
+          Authorization: `Bearer ${input.githubToken}`,
+          Accept: "application/vnd.github+json",
+          "X-GitHub-Api-Version": "2022-11-28"
+        }
+      }
+    );
+    
+    if (teamsListResponse.ok) {
+      const teams = await teamsListResponse.json() as Array<{ slug: string; name: string; privacy: string }>;
+      console.log(`[VM User Management] Available teams in ${input.org}:`, 
+        teams.map(t => `${t.slug} (${t.name}, ${t.privacy})`).join(', ') || 'none');
+      
+      // Check if the requested team exists with different casing
+      const matchingTeam = teams.find(t => t.slug.toLowerCase() === input.teamSlug.toLowerCase());
+      if (matchingTeam && matchingTeam.slug !== input.teamSlug) {
+        console.warn(`[VM User Management] Team slug case mismatch: requested "${input.teamSlug}" but found "${matchingTeam.slug}"`);
+      }
+    } else {
+      console.warn(`[VM User Management] Failed to list teams: ${teamsListResponse.status} ${teamsListResponse.statusText}`);
+      console.warn(`[VM User Management] This usually means: (1) Token lacks org:read or members:read permission, (2) GitHub App installation token has repository scope only (not org-wide), (3) Organization doesn't exist`);
+    }
+  } catch (error) {
+    console.warn(`[VM User Management] Could not list teams (request failed):`, error);
+  }
+  
+  // Try to get team info to verify access
+  const teamInfoResponse = await fetch(
+    `https://api.github.com/orgs/${input.org}/teams/${input.teamSlug}`,
+    {
+      headers: {
+        Authorization: `Bearer ${input.githubToken}`,
+        Accept: "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28"
+      }
+    }
+  );
+
+  if (!teamInfoResponse.ok) {
+    if (teamInfoResponse.status === 404) {
+      throw new Error(
+        `Failed to access team ${input.org}/${input.teamSlug}: 404 Not Found. ` +
+        `Possible causes: (1) Team doesn't exist or slug is incorrect (check available teams in logs above), ` +
+        `(2) Team is "Secret" and GitHub App is not a member of the team, ` +
+        `(3) GitHub App lacks "Organization: Members" read permission. ` +
+        `To fix: Verify team exists at https://github.com/orgs/${input.org}/teams/${input.teamSlug}, ` +
+        `ensure GitHub App installation has "Members" permission, and if team is Secret, add the app as a team member.`
+      );
+    }
+    throw new Error(`Failed to access team ${input.org}/${input.teamSlug}: ${teamInfoResponse.status} ${teamInfoResponse.statusText}`);
+  }
+
+  const teamInfo = await teamInfoResponse.json() as { id: number; slug: string; name: string; privacy: string };
+  console.log(`[VM User Management] Successfully accessed team: ${teamInfo.name} (${teamInfo.slug}, ${teamInfo.privacy})`);
+
+  // Now fetch members using pagination
   let page = 1;
   const perPage = 100;
 
@@ -213,7 +293,8 @@ async function fetchGitHubTeamMembers(input: {
       {
         headers: {
           Authorization: `Bearer ${input.githubToken}`,
-          Accept: "application/vnd.github+json"
+          Accept: "application/vnd.github+json",
+          "X-GitHub-Api-Version": "2022-11-28"
         }
       }
     );
@@ -235,6 +316,8 @@ async function fetchGitHubTeamMembers(input: {
 
     page += 1;
   }
+  
+  console.log(`[VM User Management] Found ${members.length} members in team ${input.org}/${input.teamSlug}`);
 
   return members;
 }

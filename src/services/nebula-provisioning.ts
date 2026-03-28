@@ -34,6 +34,7 @@ interface NebulaClientResponse {
   is_lighthouse: boolean;
   is_blocked: boolean;
   created_at: string;
+  current_certificate_id?: number; // Certificate ID for revocation
 }
 
 interface ProvisionResult {
@@ -721,8 +722,14 @@ export async function deprovisionNebulaClients(input: {
 /**
  * Revoke Nebula certificate for a specific environment when VM is deleted
  * 
- * This forces certificate rotation without deleting the client or token.
- * The next time the client connects, it will get a fresh certificate.
+ * Revokes the certificate without deleting the Nebula client. The client remains
+ * available for future VM deployments and will require a new certificate reissue
+ * before it can connect again. This ensures compromised VM credentials cannot be
+ * used to access the Nebula network.
+ * 
+ * Note: Nebula clients are created during repository initialization, not per-VM.
+ * Multiple VMs may use the same client, so we revoke certificates individually
+ * rather than deleting the client.
  * 
  * Note: This function is called once per VM deletion. If you need to revoke multiple
  * certificates in a batch operation, consider fetching the client list once and
@@ -752,9 +759,34 @@ export async function revokeNebulaCertificate(input: {
       return { success: true };
     }
 
-    // Reissue certificate (this revokes the old one)
+    // Get full client details to retrieve current certificate ID
+    const clientDetails = await nebulaApiCall<NebulaClientResponse>(
+      `/api/v1/clients/${client.id}`,
+      "GET"
+    );
+
+    if (!clientDetails.current_certificate_id) {
+      // No certificate to revoke
+      await recordAuditEvent({
+        actorType: "system",
+        actorId: "nebula-provisioner",
+        action: "nebula.certificate.no_cert",
+        resourceType: "nebula_client",
+        resourceId: String(client.id),
+        payload: {
+          repositoryOwner: input.repositoryOwner,
+          repositoryName: input.repositoryName,
+          environment: input.environment,
+          clientName,
+          reason: "VM deleted - no active certificate found"
+        }
+      });
+      return { success: true };
+    }
+
+    // Revoke the certificate (client remains for future use)
     await nebulaApiCall(
-      `/api/v1/clients/${client.id}/certificates/reissue`,
+      `/api/v1/clients/${client.id}/certificates/${clientDetails.current_certificate_id}/revoke`,
       "POST"
     );
 
@@ -769,7 +801,8 @@ export async function revokeNebulaCertificate(input: {
         repositoryName: input.repositoryName,
         environment: input.environment,
         clientName,
-        reason: "VM deleted"
+        certificateId: clientDetails.current_certificate_id,
+        reason: "VM deleted - certificate revoked, client retained"
       }
     });
 
@@ -923,4 +956,36 @@ export async function cleanupRepositorySecrets(input: {
   }
 
   return { deleted, failed, errors };
+}
+
+/**
+ * Get Nebula IP address for a repository environment
+ * Queries Managed Nebula API to find the client and returns its IP address
+ * Returns null if Nebula is disabled or client doesn't exist
+ */
+export async function getNebulaIpAddress(input: {
+  repositoryOwner: string;
+  repositoryName: string;
+  environment: Environment;
+}): Promise<string | null> {
+  // Skip if Nebula provisioning is disabled
+  if (!appConfig.MANAGED_NEBULA_ENABLED) {
+    return null;
+  }
+
+  try {
+    const clientName = `${input.environment}-${input.repositoryOwner}-${input.repositoryName}`;
+    const clients = await fetchAllClients();
+    const client = findClientByName(clients, clientName);
+    
+    if (!client) {
+      console.log(`[Nebula] No client found with name ${clientName}`);
+      return null;
+    }
+
+    return client.ip_address;
+  } catch (error) {
+    console.error(`[Nebula] Failed to get IP address for ${input.environment}-${input.repositoryOwner}-${input.repositoryName}:`, error);
+    return null;
+  }
 }

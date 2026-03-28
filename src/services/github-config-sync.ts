@@ -115,7 +115,23 @@ export async function syncRepositoryDeploymentConfigs(input: {
       return false;
     }
 
-    return entry.path.endsWith(".yml") || entry.path.endsWith(".yaml");
+    if (!(entry.path.endsWith(".yml") || entry.path.endsWith(".yaml"))) {
+      return false;
+    }
+
+    // Skip docker-compose files and other non-config files
+    const filename = entry.path.split('/').pop() || "";
+    if (
+      filename.startsWith("docker-compose") ||
+      filename === "Caddyfile" || // Legacy uppercase (deprecated)
+      filename === "caddyfile" ||  // Standard lowercase
+      filename === "README.yml" ||
+      filename === "README.yaml"
+    ) {
+      return false;
+    }
+
+    return true;
   });
 
   let synced = 0;

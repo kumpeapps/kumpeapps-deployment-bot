@@ -62,23 +62,130 @@ function loginPageHtml(message?: string): string {
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Admin Login</title>
+  <title>Admin Login - Kumpe Deployment Bot</title>
   <style>
-    body { font-family: system-ui, sans-serif; margin: 0; min-height: 100vh; display: grid; place-items: center; background: #0f172a; color: #e2e8f0; }
-    .card { width: min(420px, 92vw); background: #111827; border: 1px solid #334155; border-radius: 12px; padding: 24px; }
-    h1 { margin: 0 0 8px; font-size: 1.4rem; }
-    p { margin: 0 0 16px; color: #94a3b8; }
-    a.btn { display: inline-block; text-decoration: none; background: #2563eb; color: white; padding: 10px 14px; border-radius: 8px; font-weight: 600; }
-    .msg { margin-top: 12px; color: #fca5a5; }
+    :root {
+      --bg: #060606;
+      --panel: #111111;
+      --panel-2: #181818;
+      --text: #F5F5F5;
+      --muted: #B7B7B7;
+      --green: #7EDB28;
+      --green-2: #9df14a;
+      --border: #262626;
+      --radius-md: 22px;
+      --radius-sm: 14px;
+      --shadow: 0 18px 40px rgba(0, 0, 0, .32);
+      --font-sans: Inter, ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: var(--font-sans);
+      margin: 0;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: var(--bg);
+      color: var(--text);
+      padding: 24px;
+    }
+    .login-container {
+      width: 100%;
+      max-width: 480px;
+    }
+    .logo-section {
+      text-align: center;
+      margin-bottom: 32px;
+    }
+    .logo {
+      width: 160px;
+      height: 160px;
+      filter: drop-shadow(0 0 24px rgba(126, 219, 40, .18));
+      margin-bottom: 20px;
+    }
+    .logo-text {
+      color: var(--green);
+      text-transform: uppercase;
+      letter-spacing: 0.14em;
+      font-size: 12px;
+      font-weight: 700;
+      margin-bottom: 8px;
+    }
+    .card {
+      background: linear-gradient(180deg, var(--panel), var(--panel-2));
+      border: 1px solid var(--border);
+      border-radius: var(--radius-md);
+      padding: 40px 32px;
+      box-shadow: var(--shadow);
+    }
+    h1 {
+      margin: 0 0 12px;
+      font-size: 28px;
+      font-weight: 800;
+      letter-spacing: -0.02em;
+      line-height: 1.2;
+    }
+    p {
+      margin: 0 0 28px;
+      color: var(--muted);
+      font-size: 15px;
+      line-height: 1.6;
+    }
+    .btn {
+      display: block;
+      width: 100%;
+      text-decoration: none;
+      background: var(--green);
+      color: #000;
+      padding: 16px 24px;
+      border-radius: var(--radius-sm);
+      font-weight: 700;
+      font-size: 15px;
+      letter-spacing: 0.02em;
+      text-align: center;
+      transition: all 0.2s;
+      border: none;
+      cursor: pointer;
+    }
+    .btn:hover {
+      background: var(--green-2);
+      transform: translateY(-1px);
+      box-shadow: 0 4px 12px rgba(126, 219, 40, 0.3);
+    }
+    .msg {
+      margin-top: 20px;
+      padding: 14px 18px;
+      background: rgba(220, 38, 38, 0.1);
+      border: 1px solid #dc2626;
+      border-radius: var(--radius-sm);
+      color: #fca5a5;
+      font-size: 14px;
+    }
+    .footer {
+      text-align: center;
+      margin-top: 24px;
+      color: var(--muted);
+      font-size: 13px;
+    }
   </style>
 </head>
 <body>
-  <main class="card">
-    <h1>Admin Sign In</h1>
-    <p>Use GitHub login to access the deployment admin dashboard.</p>
-    <a class="btn" href="/admin/auth/github">Sign in with GitHub</a>
-    ${escaped ? `<div class="msg">${escaped}</div>` : ""}
-  </main>
+  <div class="login-container">
+    <div class="logo-section">
+      <img src="/logo.webp" alt="Kumpe Apps" class="logo">
+      <div class="logo-text">Admin Dashboard</div>
+    </div>
+    <main class="card">
+      <h1>Sign In</h1>
+      <p>Authenticate with GitHub to access the deployment admin dashboard.</p>
+      <a class="btn" href="/admin/auth/github">Sign in with GitHub</a>
+      ${escaped ? `<div class="msg">${escaped}</div>` : ""}
+    </main>
+    <div class="footer">
+      KumpeApps Deployment Bot
+    </div>
+  </div>
 </body>
 </html>`;
 }
@@ -180,5 +287,16 @@ export async function registerAdminDashboardRoutes(app: FastifyInstance): Promis
   // Redirect /admin/ to /admin
   app.get("/admin/", async (request, reply) => {
     return reply.redirect("/admin");
+  });
+
+  // Serve logo for admin dashboard
+  app.get("/logo.webp", async (_request, reply) => {
+    try {
+      const logoPath = join(currentDir, "..", "..", "public", "logo.webp");
+      const logo = await readFile(logoPath);
+      return reply.type("image/webp").send(logo);
+    } catch (error) {
+      return reply.code(404).send({ error: "Logo not found" });
+    }
   });
 }

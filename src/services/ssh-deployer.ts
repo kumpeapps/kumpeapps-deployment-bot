@@ -131,8 +131,19 @@ async function runCommand(command: string, args: string[]): Promise<{ stdout: st
   });
 
   if (lastError instanceof Error) {
+    const maybeStdout = "stdout" in lastError ? String((lastError as { stdout?: unknown }).stdout ?? "") : "";
     const maybeStderr = "stderr" in lastError ? String((lastError as { stderr?: unknown }).stderr ?? "") : "";
-    throw new Error(`${lastError.message}${maybeStderr ? ` | stderr: ${maybeStderr.trim()}` : ""}`);
+    
+    // Build detailed error message with both stdout and stderr
+    let errorMessage = lastError.message;
+    if (maybeStdout.trim()) {
+      errorMessage += ` | stdout: ${maybeStdout.trim()}`;
+    }
+    if (maybeStderr.trim()) {
+      errorMessage += ` | stderr: ${maybeStderr.trim()}`;
+    }
+    
+    throw new Error(errorMessage);
   }
 
   throw new Error("Command execution failed");
@@ -277,29 +288,24 @@ export async function compensateComposeOnVm(input: {
 
 /**
  * Generate unique Caddy config file name for multi-repo deployments
- * Format: {owner}-{env}-{repo}-{originalFileName}
- * This ensures uniqueness even when repo names are duplicated across orgs
- * Adds .caddy extension if no extension is present
+ * Format: {owner}-{repo}-{env}.caddy (all lowercase)
+ * Example: kumpeapps-myapp-dev.caddy
  */
-function generateCaddyFileName(owner: string, repo: string, environment: string, originalName: string): string {
-  // Sanitize components to ensure valid filenames
+function generateCaddyFileName(
+  owner: string, 
+  repo: string, 
+  environment: string
+): string {
   const sanitize = (str: string) => str.replace(/[^a-zA-Z0-9._-]/g, '-').toLowerCase();
-  
-  // Add .caddy extension if file has no extension
-  let fileName = originalName;
-  if (!fileName.includes('.')) {
-    fileName = `${fileName}.caddy`;
-  }
-  
-  return `${sanitize(owner)}-${sanitize(environment)}-${sanitize(repo)}-${fileName}`;
+  return `${sanitize(owner)}-${sanitize(repo)}-${sanitize(environment)}.caddy`;
 }
 
 export async function deployCaddyConfig(input: CaddyDeployInput): Promise<{ message: string; deployedFiles: string[] }> {
   if (input.dryRun) {
     return {
       message: "(dry run — no SSH commands executed)",
-      deployedFiles: Object.keys(input.caddyConfig).map(name =>
-        generateCaddyFileName(input.repositoryOwner, input.repositoryName, input.environment, name)
+      deployedFiles: Object.keys(input.caddyConfig).map(() =>
+        generateCaddyFileName(input.repositoryOwner, input.repositoryName, input.environment)
       )
     };
   }
@@ -331,13 +337,12 @@ export async function deployCaddyConfig(input: CaddyDeployInput): Promise<{ mess
     );
 
     let fileIndex = 0;
-    for (const [originalFileName, content] of Object.entries(input.caddyConfig)) {
+    for (const [, content] of Object.entries(input.caddyConfig)) {
       // Generate unique file name to avoid conflicts between repos
       const uniqueFileName = generateCaddyFileName(
         input.repositoryOwner,
         input.repositoryName,
-        input.environment,
-        originalFileName
+        input.environment
       );
       deployedFiles.push(uniqueFileName);
 

@@ -22,7 +22,6 @@ export const DeploymentConfigSchema = z.object({
   plan_name: z.string().min(1).max(255).optional(),
   domains: z.array(z.string().min(1).max(255)).min(1),
   docker_compose: z.string().min(1),
-  caddy: z.record(z.string().min(1), z.string().min(1)),
   env_mappings: z.record(z.string().min(1), z.string().min(1)),
   deploy_rules: z.array(DeployRulesSchema).min(1),
   ssh_port: z.number().int().positive().optional(), // Optional SSH port override for VM
@@ -36,15 +35,16 @@ export function normalizeDomain(domain: string): string {
   return domain.trim().toLowerCase();
 }
 
-export function extractDomainsFromCaddy(caddyBlocks: Record<string, string>): string[] {
+/**
+ * Extract domains from a single Caddyfile content string
+ */
+export function extractDomainsFromCaddyfile(caddyfileContent: string): string[] {
   const hostPattern = /(^|\s)(\*\.)?([a-z0-9-]+\.)+[a-z]{2,}(?=\s|\{|$)/gim;
   const domains = new Set<string>();
 
-  for (const block of Object.values(caddyBlocks)) {
-    const matches = block.match(hostPattern) ?? [];
-    for (const match of matches) {
-      domains.add(normalizeDomain(match.trim()));
-    }
+  const matches = caddyfileContent.match(hostPattern) ?? [];
+  for (const match of matches) {
+    domains.add(normalizeDomain(match.trim()));
   }
 
   return Array.from(domains);
@@ -81,7 +81,6 @@ export function validateDeploymentPolicy(input: {
 }): string[] {
   const errors: string[] = [];
   const configDomains = Array.from(new Set(input.config.domains.map(normalizeDomain)));
-  const caddyDomains = extractDomainsFromCaddy(input.config.caddy);
 
   if (input.expectedUsername) {
     const expected = input.expectedUsername.trim().toLowerCase();
@@ -106,21 +105,39 @@ export function validateDeploymentPolicy(input: {
     }
   }
 
-  for (const caddyDomain of caddyDomains) {
-    if (!configDomains.includes(caddyDomain)) {
-      errors.push(`caddy domain ${caddyDomain} is not declared in domains`);
-    }
-  }
-
   for (const domain of configDomains) {
     if (!isDomainApproved(domain, input.approvedDomains)) {
       errors.push(`domain ${domain} is not in user's approved domains`);
     }
   }
 
+  return errors;
+}
+
+/**
+ * Validate that domains in Caddyfile match config domains and are authorized
+ * Returns array of error messages (empty if valid)
+ */
+export function validateCaddyfileDomains(input: {
+  caddyfileContent: string;
+  configDomains: string[];
+  approvedDomains: string[];
+}): string[] {
+  const errors: string[] = [];
+  const caddyDomains = extractDomainsFromCaddyfile(input.caddyfileContent);
+  const normalizedConfigDomains = input.configDomains.map(normalizeDomain);
+
+  // Check that each Caddyfile domain is declared in config
+  for (const caddyDomain of caddyDomains) {
+    if (!normalizedConfigDomains.includes(caddyDomain)) {
+      errors.push(`Caddyfile contains domain '${caddyDomain}' which is not declared in config domains`);
+    }
+  }
+
+  // Check that each Caddyfile domain is authorized
   for (const caddyDomain of caddyDomains) {
     if (!isDomainApproved(caddyDomain, input.approvedDomains)) {
-      errors.push(`caddy domain ${caddyDomain} is not in user's approved domains`);
+      errors.push(`Caddyfile contains domain '${caddyDomain}' which is not in authorized domains`);
     }
   }
 

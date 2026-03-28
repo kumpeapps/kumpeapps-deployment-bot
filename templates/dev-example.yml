@@ -7,9 +7,18 @@ vm_hostname: dev-vm-myapp
 
 # Optional: VM user management
 # Users will be created on the VM and added to bot-admin group
+# Smart groups:
+#   - github.repo.collaborators (all repo collaborators)
+#   - github.repo.admins (repo admins only)
+#   - github.org.team.TEAM_SLUG (org team members - uses repo owner as org)
+#   - github.org.ORG_NAME.team.TEAM_SLUG (specific org team)
+# Note: Organization team smart groups require GitHub App to have
+# "Organization: Members" read permission. Without this permission,
+# team expansion will fail and you should use individual usernames instead.
 authorized_admins:
   - github.repo.admins
-  - github.org.kumpeapps.team.vm_admins
+  # - github.org.kumpeapps.team.vm-admins  # Requires org-level GitHub App permissions
+  # - justinkumpe  # Or specify individual usernames
 
 # Domains for reverse proxy
 domains:
@@ -32,22 +41,28 @@ docker_compose: docker-compose.yml
 #         NODE_ENV: development
 #         LOG_LEVEL: debug
 
-# Caddy configuration - reference file or inline
-# Files are deployed with unique names: {owner}-{env}-{repo}-{fileName}
-# Files without extensions get .caddy added automatically
-# Example: 'main: caddyfile' → 'kumpeapps-dev-myapp-main.caddy'
-caddy:
-  main: caddyfile
-
-# Inline example:
-# caddy:
-#   main: |
-#     myapp-dev.example.com {
-#       import cloudns_dns
-#       import force_https
-#       reverse_proxy {{nebula.ip}}:8080
-#       log {
-#         output file /var/log/caddy/myapp-dev.log
+# Caddy configuration
+# Place a file named 'caddyfile' in the same directory as this config file
+# The caddyfile will be deployed as: {owner}-{repo}-{env}.caddy
+# Example: 'kumpeapps-myapp-dev.caddy'
+#
+# All domains in the caddyfile must be:
+#   1. Declared in the 'domains' list above
+#   2. In your authorized domains list
+#
+# caddyfile example:
+# myapp-dev.example.com {
+#   import cloudns_dns
+#   import force_https
+#   reverse_proxy {{nebula.ip}}:8080
+#   log {
+#     output file /var/log/caddy/myapp-dev.log
+#   }
+# }
+#
+# Available placeholders:
+#   {{vm.ip}} - VM IP address
+#   {{nebula.ip}} - Nebula VPN IP (from DEV_NEBULA_IP secret)
 #       }
 #     }
 
