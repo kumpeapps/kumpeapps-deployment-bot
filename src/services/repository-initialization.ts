@@ -22,7 +22,9 @@ import {
   createOrUpdateGitHubFile,
   createGitHubPullRequest,
   createMultipleFilesInSingleCommit,
-  linkIssueToBranch
+  linkIssueToBranch,
+  addRepositoryCollaborator,
+  acceptRepositoryInvitation
 } from "./github-automation.js";
 import { generateSyncSecretsWorkflow } from "./workflow-generator.js";
 
@@ -460,6 +462,35 @@ export async function initializeRepository(input: {
 
     // Step 1: Create or use existing initialization issue
     const issue = input.existingIssue ?? await createInitializationIssue(input);
+
+    // Step 1a: Add kumpeapps-bot-deploy as collaborator
+    try {
+      await addRepositoryCollaborator({
+        repositoryOwner: input.repositoryOwner,
+        repositoryName: input.repositoryName,
+        username: "kumpeapps-bot-deploy",
+        permission: "push"
+      });
+      console.log(
+        `[Repository Initialization] Added kumpeapps-bot-deploy as collaborator to ${input.repositoryOwner}/${input.repositoryName}`
+      );
+
+      // Auto-accept the invitation (for personal repos)
+      const accepted = await acceptRepositoryInvitation({
+        repositoryOwner: input.repositoryOwner,
+        repositoryName: input.repositoryName
+      });
+      if (accepted) {
+        console.log(
+          `[Repository Initialization] Auto-accepted collaborator invitation for ${input.repositoryOwner}/${input.repositoryName}`
+        );
+      }
+    } catch (error) {
+      console.warn(
+        `[Repository Initialization] Failed to add kumpeapps-bot-deploy as collaborator: ${error}`
+      );
+      // Non-fatal - continue with initialization
+    }
 
     // Step 2: Provision token and optionally Nebula clients
     await handleProvisioning({

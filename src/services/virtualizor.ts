@@ -175,6 +175,10 @@ function editUrl(vmId: string): string {
   return `${baseApiUrl()}/index.php?act=editvm&${apiParams()}`;
 }
 
+function deleteUrl(vmId: string): string {
+  return `${baseApiUrl()}/index.php?act=vs&delete=${encodeURIComponent(vmId)}&${apiParams()}`;
+}
+
 async function pollVmReady(vmId: string, knownIp?: string): Promise<string> {
   const deadline = Date.now() + appConfig.VIRTUALIZOR_VM_READY_TIMEOUT_MS;
   const interval = appConfig.VIRTUALIZOR_VM_READY_POLL_INTERVAL_MS;
@@ -965,6 +969,62 @@ async function ensureViaApi(input: VmEnsureInput): Promise<VmEnsureResult> {
 }
 
 export { resolvePlanDetails };
+
+/**
+ * Delete a Virtualizor VM
+ * @param vmId The Virtualizor VM ID
+ * @param dryRun Whether to simulate the deletion
+ * @returns Object with success status
+ */
+export async function deleteVirtualizorVm(input: {
+  vmId: string;
+  dryRun: boolean;
+}): Promise<{ success: boolean; error?: string }> {
+  if (input.dryRun || appConfig.VIRTUALIZOR_MODE === "dryrun") {
+    return { success: true };
+  }
+
+  if (appConfig.VIRTUALIZOR_MODE === "manual") {
+    return {
+      success: false,
+      error: "Virtualizor is in manual mode - VM deletion must be done through Virtualizor admin panel"
+    };
+  }
+
+  if (appConfig.VIRTUALIZOR_MODE === "api") {
+    try {
+      const data = await fetchVirtualizorJson<any>(deleteUrl(input.vmId));
+      
+      // Check for errors in response
+      if (data.error && Array.isArray(data.error) && data.error.length > 0) {
+        return {
+          success: false,
+          error: data.error.join(', ')
+        };
+      }
+
+      // Virtualizor returns done object on successful deletion
+      if (data.done || data.done_msg || data.title === 'Done') {
+        return { success: true };
+      }
+
+      return {
+        success: false,
+        error: "Virtualizor API returned unexpected response structure"
+      };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : String(error)
+      };
+    }
+  }
+
+  return {
+    success: false,
+    error: "Unsupported Virtualizor mode"
+  };
+}
 
 export async function ensureVirtualizorVm(input: VmEnsureInput): Promise<VmEnsureResult> {
   if (input.dryRun || appConfig.VIRTUALIZOR_MODE === "dryrun") {

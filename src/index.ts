@@ -23,6 +23,7 @@ import { startTokenProvisioningScheduler } from "./services/repository-token-pro
 import { pruneExpiredSnoozesRecords } from "./services/alert-snooze-cleanup.js";
 import { pruneOldDeploymentJobs } from "./services/deployment-job-cleanup.js";
 import { pruneOldWebhookDeliveries } from "./services/webhook-delivery-cleanup.js";
+import { startWebhookRetryScheduler, stopWebhookRetryScheduler } from "./services/webhook-retry-scheduler.js";
 import { InMemoryRateLimiter } from "./services/rate-limit.js";
 import { recordAdminApiAuthFailure } from "./services/admin-api-security-health.js";
 import { recordRateLimitBlockedRequest } from "./services/rate-limit-health.js";
@@ -247,6 +248,21 @@ async function start(): Promise<void> {
         app.log
       );
     }
+
+    // Start webhook retry scheduler
+    if (appConfig.WEBHOOK_RETRY_ENABLED) {
+      app.log.info(
+        { 
+          intervalMs: appConfig.WEBHOOK_RETRY_INTERVAL_MS,
+          maxAttempts: appConfig.WEBHOOK_RETRY_MAX_ATTEMPTS
+        },
+        "Starting webhook retry scheduler"
+      );
+      startWebhookRetryScheduler(
+        appConfig.WEBHOOK_RETRY_INTERVAL_MS,
+        app.log
+      );
+    }
     
     await app.listen({ host: "0.0.0.0", port: appConfig.PORT });
     app.log.info({ port: appConfig.PORT }, "Bot service listening");
@@ -259,6 +275,7 @@ async function start(): Promise<void> {
 async function shutdown(signal: NodeJS.Signals): Promise<void> {
   app.log.info({ signal }, "Shutting down");
   stopDeploymentQueueWorker();
+  stopWebhookRetryScheduler(app.log);
   await app.close();
   await prisma.$disconnect();
   process.exit(0);

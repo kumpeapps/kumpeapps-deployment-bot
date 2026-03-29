@@ -151,6 +151,7 @@ const EnvSchema = z.object({
   WEBHOOK_RETRY_ENABLED: envBoolean().default(true),
   WEBHOOK_RETRY_MAX_ATTEMPTS: z.coerce.number().int().positive().max(10).default(3),
   WEBHOOK_RETRY_INTERVAL_MS: z.coerce.number().int().positive().default(300000), // 5 minutes
+  WEBHOOK_RETRY_MAX_AGE_DAYS: z.coerce.number().int().positive().default(7), // Don't retry webhooks older than 7 days
   // Managed Nebula VPN provisioning
   MANAGED_NEBULA_ENABLED: envBoolean().default(false),
   MANAGED_NEBULA_API_URL: z.string().default(""),

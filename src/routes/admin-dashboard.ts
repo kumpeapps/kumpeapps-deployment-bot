@@ -299,4 +299,32 @@ export async function registerAdminDashboardRoutes(app: FastifyInstance): Promis
       return reply.code(404).send({ error: "Logo not found" });
     }
   });
+
+  // Serve images from public/images directory
+  app.get("/images/:filename", async (request, reply) => {
+    try {
+      const { filename } = request.params as { filename: string };
+      
+      // Security: prevent path traversal
+      if (filename.includes("..") || filename.includes("/") || filename.includes("\\")) {
+        return reply.code(400).send({ error: "Invalid filename" });
+      }
+
+      const imagePath = join(currentDir, "..", "..", "public", "images", filename);
+      const imageData = await readFile(imagePath);
+      
+      // Determine content type based on file extension
+      const ext = filename.split(".").pop()?.toLowerCase();
+      const contentType = ext === "png" ? "image/png" :
+                         ext === "jpg" || ext === "jpeg" ? "image/jpeg" :
+                         ext === "gif" ? "image/gif" :
+                         ext === "svg" ? "image/svg+xml" :
+                         ext === "webp" ? "image/webp" :
+                         "application/octet-stream";
+      
+      return reply.type(contentType).send(imageData);
+    } catch (error) {
+      return reply.code(404).send({ error: "Image not found" });
+    }
+  });
 }

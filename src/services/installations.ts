@@ -27,6 +27,19 @@ export async function upsertInstallation(input: {
     });
 
     for (const repository of input.repositories) {
+      // Check if repository exists and was previously initialized
+      const existingRepo = await tx.repository.findUnique({
+        where: {
+          owner_name: {
+            owner: repository.owner,
+            name: repository.name
+          }
+        },
+        select: { apiToken: true, active: true }
+      });
+
+      const wasInitializedButInactive = existingRepo?.apiToken && !existingRepo.active;
+
       await tx.repository.upsert({
         where: {
           owner_name: {
@@ -37,7 +50,11 @@ export async function upsertInstallation(input: {
         update: {
           installationId: input.installationId,
           defaultBranch: repository.defaultBranch,
-          active: true
+          active: true,
+          // Clear initialization state if repo was uninstalled and is being reinstalled
+          // This prevents ghost state where DB says "initialized" but Nebula clients are gone
+          // User can run /bot initialize or /bot reinitialize to properly set up again
+          ...(wasInitializedButInactive ? { apiToken: null } : {})
         },
         create: {
           installationId: input.installationId,
