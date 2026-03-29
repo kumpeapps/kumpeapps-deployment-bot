@@ -148,8 +148,9 @@ export async function createGitHubIssue(input: CreateIssueInput): Promise<Create
 
 /**
  * Add a comment to a GitHub issue
+ * Returns the comment ID for later updates
  */
-export async function addGitHubComment(input: CreateCommentInput): Promise<void> {
+export async function addGitHubComment(input: CreateCommentInput): Promise<number> {
   const token = await getGitHubToken(input.repositoryOwner, input.repositoryName);
   if (!token) {
     throw new Error("No GitHub token available");
@@ -176,6 +177,8 @@ export async function addGitHubComment(input: CreateCommentInput): Promise<void>
     throw new Error(`Failed to add comment: HTTP ${response.status} - ${errorText}`);
   }
 
+  const commentData = await response.json() as { id: number };
+
   await recordAuditEvent({
     actorType: "system",
     actorId: "github-automation",
@@ -185,7 +188,59 @@ export async function addGitHubComment(input: CreateCommentInput): Promise<void>
     payload: {
       repositoryOwner: input.repositoryOwner,
       repositoryName: input.repositoryName,
-      issueNumber: input.issueNumber
+      issueNumber: input.issueNumber,
+      commentId: commentData.id
+    }
+  });
+
+  return commentData.id;
+}
+
+/**
+ * Update an existing GitHub comment
+ */
+export async function updateGitHubComment(input: {
+  repositoryOwner: string;
+  repositoryName: string;
+  commentId: number;
+  body: string;
+}): Promise<void> {
+  const token = await getGitHubToken(input.repositoryOwner, input.repositoryName);
+  if (!token) {
+    throw new Error("No GitHub token available");
+  }
+
+  const url = `https://api.github.com/repos/${encodeURIComponent(input.repositoryOwner)}/${encodeURIComponent(input.repositoryName)}/issues/comments/${input.commentId}`;
+
+  const response = await fetch(url, {
+    method: "PATCH",
+    headers: {
+      "Accept": "application/vnd.github+json",
+      "Authorization": `Bearer ${token}`,
+      "User-Agent": "kumpeapps-deployment-bot",
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      body: input.body
+    }),
+    signal: AbortSignal.timeout(15000)
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`Failed to update comment: HTTP ${response.status} - ${errorText}`);
+  }
+
+  await recordAuditEvent({
+    actorType: "system",
+    actorId: "github-automation",
+    action: "github.comment.updated",
+    resourceType: "github_comment",
+    resourceId: String(input.commentId),
+    payload: {
+      repositoryOwner: input.repositoryOwner,
+      repositoryName: input.repositoryName,
+      commentId: input.commentId
     }
   });
 }
@@ -1149,6 +1204,57 @@ export async function listInstallationRepositories(input: {
     return repositories;
   } catch (error) {
     console.error("Error listing installation repositories:", error);
+    throw error;
+  }
+}
+
+/**
+ * Check if a user is a collaborator on a repository
+ * Returns true if user has any permission level (read, triage, write, maintain, admin)
+ */
+export async function isUserCollaborator(input: {
+  repositoryOwner: string;
+  repositoryName: string;
+  username: string;
+}): Promise<boolean> {
+  const token = await getGitHubToken(input.repositoryOwner, input.repositoryName);
+  if (!token) {
+    throw new Error("No GitHub token available");
+  }
+
+  try {
+    const url = `https://api.github.com/repos/${encodeURIComponent(input.repositoryOwner)}/${encodeURIComponent(input.repositoryName)}/collaborators/${encodeURIComponent(input.username)}/permission`;
+
+    const response = await fetch(url, {
+      method: "GET",
+      headers: {
+        "Accept": "application/vnd.github+json",
+        "Authorization": `Bearer ${token}`,
+        "X-GitHub-Api-Version": "2022-11-28",
+        "User-Agent": "kumpeapps-deployment-bot"
+      },
+      signal: AbortSignal.timeout(10000)
+    });
+
+    if (response.status === 404) {
+      // User is not a collaborator
+      return false;
+    }
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`Failed to check collaborator status: HTTP ${response.status} - ${errorText}`);
+    }
+
+    const data = await response.json() as {
+      permission: string; // "admin" | "write" | "read" | "none" | "maintain" | "triage"
+      user: { login: string };
+    };
+
+    // Any permission except "none" means they are a collaborator
+    return data.permission !== "none";
+  } catch (error) {
+    console.error(`Error checking if ${input.username} is collaborator:`, error);
     throw error;
   }
 }

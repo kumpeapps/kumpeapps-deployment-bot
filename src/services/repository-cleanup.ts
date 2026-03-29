@@ -146,6 +146,17 @@ export async function cleanupRepository(input: {
     );
   }
 
+  // Clear initialization state (apiToken) so repository can be reinitialized
+  await prisma.repository.update({
+    where: { id: repository.id },
+    data: { apiToken: null }
+  } as any);
+
+  logger.info(
+    { owner: input.owner, repo: input.name },
+    "Cleared repository initialization state"
+  );
+
   // Record audit event
   await recordAuditEvent({
     actorType: "system",

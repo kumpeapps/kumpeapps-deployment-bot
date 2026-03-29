@@ -386,6 +386,10 @@ Access the web-based admin interface at `GET /admin` (GitHub OAuth login).
 	- `WEBHOOK_SYNC_RETRY_BASE_DELAY_MS` controls exponential backoff base delay for webhook sync retries
 	- `WEBHOOK_DELIVERY_IN_PROGRESS_LEASE_MS` allows reclaiming stale `in_progress` deliveries after lease expiration
 	- `WEBHOOK_DELIVERY_RETENTION_DAYS` keeps webhook idempotency records bounded (default: 30 days)
+	- `WEBHOOK_RETRY_ENABLED` enables automatic retry of failed webhooks (default: true)
+	- `WEBHOOK_RETRY_MAX_ATTEMPTS` maximum retry attempts per failed webhook (default: 3, max: 10)
+	- `WEBHOOK_RETRY_INTERVAL_MS` interval between retry checks (default: 300000 = 5 minutes)
+	- `WEBHOOK_RETRY_MAX_AGE_DAYS` don't retry webhooks older than this many days (default: 7)
 	- `WEBHOOK_ALERT_FAILED_24H_HIGH` threshold for failed webhook deliveries in last 24h
 	- `WEBHOOK_ALERT_IN_PROGRESS_HIGH` threshold for currently in-progress webhook deliveries
 	- `WEBHOOK_ALERT_STALE_RECLAIMS_24H_HIGH` threshold for stale reclaim events in last 24h
@@ -478,12 +482,24 @@ Access the web-based admin interface at `GET /admin` (GitHub OAuth login).
 	- `installation.deleted`
 	- `installation_repositories.added`
 	- `installation_repositories.removed`
-2. Webhook delivery idempotency is enforced in MariaDB:
+2. Webhook delivery idempotency and recovery:
 	- deliveries are tracked in `github_webhook_deliveries` by GitHub `x-github-delivery`
 	- `processed` and `in_progress` duplicates are suppressed with HTTP 202 (`duplicate: true`)
 	- stale `in_progress` deliveries are automatically reclaimed after `WEBHOOK_DELIVERY_IN_PROGRESS_LEASE_MS`
 	- failed deliveries are allowed to retry on the same delivery id
 	- webhook signature is verified before delivery tracking is used
+	- **Webhook Backfill System**: Automatically replays webhooks missed during downtime
+		- ✅ **Queries GitHub's webhook delivery API** for failed deliveries on bot startup
+		- ✅ **Fetches payload from GitHub** and reprocesses through normal webhook pipeline
+		- ✅ **Filters by age**: Only processes webhooks newer than `WEBHOOK_RETRY_MAX_AGE_DAYS`
+		- ✅ **Idempotency-safe**: Skips already-processed deliveries, handles duplicates gracefully
+		- ⚠️ Requires GitHub App authentication (`GITHUB_APP_ID` + private key)
+		- 🔄 Runs on bot startup and every `WEBHOOK_RETRY_INTERVAL_MS` (5 min default)
+		- Configuration:
+			- `WEBHOOK_RETRY_ENABLED=true` enables backfill (default)
+			- `WEBHOOK_RETRY_MAX_AGE_DAYS=7` only processes webhooks from last N days
+			- `WEBHOOK_RETRY_INTERVAL_MS=300000` sets check frequency (5 min)
+			- `WEBHOOK_RETRY_MAX_ATTEMPTS=3` limits retries for webhooks received but failed
 3. Webhook delivery observability:
 	- `/health` includes webhook delivery totals and 24h status counts
 	- `/metrics` includes Prometheus metrics for processed/failed/in-progress deliveries

@@ -1,4 +1,5 @@
 import { prisma } from "../db.js";
+import { appConfig } from "../config.js";
 import { getGitHubToken } from "./github-app-auth.js";
 import { triggerQueuePoll } from "./deployment-queue.js";
 
@@ -56,7 +57,10 @@ export async function createVmApprovalRequest(input: CreateApprovalInput): Promi
   // Create GitHub issue via REST API
   const token = await getGitHubToken(owner, name);
   
-  const issueBody = `## VM Approval Request
+  const imageUrl = `${appConfig.APP_PUBLIC_BASE_URL.replace(/\/$/, "")}/images/requesting_authorization.webp`;
+  const issueBody = `![Requesting Authorization](${imageUrl})
+
+## VM Approval Request
 
 A new virtual machine is requested for this repository.
 
@@ -80,6 +84,7 @@ A new virtual machine is requested for this repository.
 \`\`\`
 
 **Note:** Only you (@${input.assignedUsername}) can approve this request. The VM will be created automatically once approved.`;
+
 
   const issueResponse = await fetch(`https://api.github.com/repos/${owner}/${name}/issues`, {
     method: 'POST',

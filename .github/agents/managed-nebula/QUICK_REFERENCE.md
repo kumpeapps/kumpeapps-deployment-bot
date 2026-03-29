@@ -40,6 +40,12 @@ GET /api/v1/clients
 # Get client config
 GET /api/v1/clients/{id}/config
 
+# List client certificates
+GET /api/v1/clients/{id}/certificates
+
+# Revoke specific certificate (admin-only)
+POST /api/v1/clients/{id}/certificates/{cert_id}/revoke
+
 # Update client
 PUT /api/v1/clients/{id}
 {

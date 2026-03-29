@@ -23,13 +23,13 @@ function keyFromPassphrase(passphrase: string): Buffer {
 }
 
 export function encryptSecretValue(plaintext: string): string {
-  return encryptWithKey(plaintext, getEncryptionKey());
+  return encryptWithKey(plaintext.trim(), getEncryptionKey());
 }
 
 export function decryptSecretValue(stored: string): string {
   if (!stored.startsWith(ENCRYPTED_PREFIX)) {
     // Backward compatibility for legacy plaintext rows.
-    return stored;
+    return stored.trim();
   }
 
   const keys: Buffer[] = [getEncryptionKey()];
@@ -43,7 +43,7 @@ export function decryptSecretValue(stored: string): string {
 
   for (const key of keys) {
     try {
-      return decryptWithKey(stored, key);
+      return decryptWithKey(stored, key).trim();
     } catch {
       // Continue trying fallback keys.
     }
@@ -54,14 +54,14 @@ export function decryptSecretValue(stored: string): string {
 
 export function decryptSecretValueWithPassphrase(stored: string, passphrase: string): string {
   if (!stored.startsWith(ENCRYPTED_PREFIX)) {
-    return stored;
+    return stored.trim();
   }
 
-  return decryptWithKey(stored, keyFromPassphrase(passphrase));
+  return decryptWithKey(stored, keyFromPassphrase(passphrase)).trim();
 }
 
 export function encryptSecretValueWithPassphrase(plaintext: string, passphrase: string): string {
-  return encryptWithKey(plaintext, keyFromPassphrase(passphrase));
+  return encryptWithKey(plaintext.trim(), keyFromPassphrase(passphrase));
 }
 
 export function isEncryptedSecretValue(stored: string): boolean {

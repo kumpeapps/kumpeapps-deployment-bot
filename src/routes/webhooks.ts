@@ -15,11 +15,19 @@ import {
 import { provisionRepositoryToken } from "../services/repository-tokens.js";
 import { provisionNebulaClients, deprovisionNebulaClients, revokeNebulaCertificate } from "../services/nebula-provisioning.js";
 import { initializeRepository } from "../services/repository-initialization.js";
-import { addRepositoryCollaborator, acceptRepositoryInvitation, checkDirectoryExists, listInstallationRepositories, addGitHubComment } from "../services/github-automation.js";
+import { addRepositoryCollaborator, acceptRepositoryInvitation, checkDirectoryExists, listInstallationRepositories, addGitHubComment, isUserCollaborator, updateGitHubComment } from "../services/github-automation.js";
 import { recordInvalidWebhookSignature } from "../services/webhook-security-health.js";
 import { processApprovalComment } from "../services/vm-approval.js";
 import { removeCaddyConfig } from "../services/ssh-deployer.js";
 import { getGitHubToken } from "../services/github-app-auth.js";
+import { deleteVirtualizorVm } from "../services/virtualizor.js";
+
+// Module-level webhook processor for backfill support
+let webhookProcessor: ((input: { id: string; name: string; payload: any }) => Promise<void>) | null = null;
+
+export function getWebhookProcessor(): ((input: { id: string; name: string; payload: any }) => Promise<void>) | null {
+  return webhookProcessor;
+}
 
 function splitFullName(fullName: string): { owner: string; name: string } {
   const [owner, name] = fullName.split("/");
@@ -83,6 +91,9 @@ export async function registerWebhookRoutes(
     name: string;
     payload: string;
   }) => Promise<void>;
+  
+  // Store webhook processor for backfill support
+  webhookProcessor = receiveWebhook;
 
   webhooks.on("push", async ({ payload }: { payload: any }) => {
     const fullName = payload.repository.full_name;
@@ -836,7 +847,8 @@ export async function registerWebhookRoutes(
     if (!isInitialized) {
       commands.push("- `/bot initialize` - Initialize this repository for deployments");
     } else {
-      commands.push("- `/bot redeploy <environment>` - Redeploy to specified environment (dev, stage, or prod)");
+      commands.push("- `/bot reinitialize` - Reinitialize repository (cleans up Nebula clients and regenerates configuration)");
+      commands.push("- `/bot redeploy [environment]` - Redeploy to all or specific environment (dev, stage, prod)");
       commands.push("- `/bot uninitialize` - Remove bot configuration and clean up resources");
       
       if (hasVms) {
@@ -896,8 +908,8 @@ Reply to this issue with a command to get started!`;
       "Processing bot command from issue comment"
     );
 
-    // Parse command
-    const commandMatch = comment.trim().match(/^\/bot\s+(\w+)(?:\s+(\w+))?/);
+    // Parse command (allow hyphens in command names)
+    const commandMatch = comment.trim().match(/^\/bot\s+([\w-]+)(?:\s+(\w+))?/);
     if (!commandMatch) {
       await addGitHubComment({
         repositoryOwner: owner,
@@ -910,6 +922,48 @@ Reply to this issue with a command to get started!`;
 
     const command = commandMatch[1].toLowerCase();
     const arg = commandMatch[2]?.toLowerCase();
+
+    // Check if user is a collaborator (required for all bot commands)
+    try {
+      const isCollaborator = await isUserCollaborator({
+        repositoryOwner: owner,
+        repositoryName: name,
+        username: commentAuthor
+      });
+
+      if (!isCollaborator) {
+        app.log.warn(
+          { repositoryFullName, issueNumber, commentAuthor, command },
+          "Bot command rejected: user is not a collaborator"
+        );
+        
+        const imageUrl = `${appConfig.APP_PUBLIC_BASE_URL.replace(/\/$/, "")}/images/access_denied_github.webp`;
+        await addGitHubComment({
+          repositoryOwner: owner,
+          repositoryName: name,
+          issueNumber,
+          body: `![Access Denied](${imageUrl})\n\n❌ @${commentAuthor} You must be a repository collaborator to use bot commands.`
+        });
+        return;
+      }
+
+      app.log.info(
+        { repositoryFullName, issueNumber, commentAuthor, command },
+        "Bot command authorized: user is a collaborator"
+      );
+    } catch (error) {
+      app.log.error(
+        { error, repositoryFullName, issueNumber, commentAuthor },
+        "Failed to check collaborator status"
+      );
+      await addGitHubComment({
+        repositoryOwner: owner,
+        repositoryName: name,
+        issueNumber,
+        body: "❌ Failed to verify permissions. Please try again later."
+      });
+      return;
+    }
 
     // Check repository state
     const repository = await prisma.repository.findUnique({
@@ -979,12 +1033,141 @@ Reply to this issue with a command to get started!`;
             return;
           }
 
-          if (!arg || !['dev', 'stage', 'prod'].includes(arg)) {
+          // Check if commenter is a collaborator
+          try {
+            const token = await getGitHubToken(owner, name);
+            const collaboratorResponse = await fetch(
+              `https://api.github.com/repos/${owner}/${name}/collaborators/${commentAuthor}`,
+              {
+                headers: {
+                  'Authorization': `Bearer ${token}`,
+                  'Accept': 'application/vnd.github+json'
+                }
+              }
+            );
+
+            if (collaboratorResponse.status !== 204) {
+              await addGitHubComment({
+                repositoryOwner: owner,
+                repositoryName: name,
+                issueNumber,
+                body: `❌ @${commentAuthor} Only repository collaborators can use the \`/bot redeploy\` command.`
+              });
+              return;
+            }
+
+            const targetEnvironment = arg as "dev" | "stage" | "prod" | undefined;
+
+            // Get default branch and latest commit
+            const repoResponse = await fetch(
+              `https://api.github.com/repos/${owner}/${name}`,
+              {
+                headers: {
+                  'Authorization': `Bearer ${token}`,
+                  'Accept': 'application/vnd.github+json'
+                }
+              }
+            );
+
+            if (!repoResponse.ok) {
+              throw new Error(`Failed to fetch repository details: ${repoResponse.status}`);
+            }
+
+            const repoData = await repoResponse.json() as { default_branch: string };
+            const defaultBranch = repoData.default_branch;
+
+            // Get latest commit from default branch
+            const commitResponse = await fetch(
+              `https://api.github.com/repos/${owner}/${name}/commits/${defaultBranch}`,
+              {
+                headers: {
+                  'Authorization': `Bearer ${token}`,
+                  'Accept': 'application/vnd.github+json'
+                }
+              }
+            );
+
+            if (!commitResponse.ok) {
+              throw new Error(`Failed to fetch latest commit: ${commitResponse.status}`);
+            }
+
+            const commitData = await commitResponse.json() as { sha: string };
+            const latestCommitSha = commitData.sha;
+
+            // Find deployment configs
+            const deploymentConfigs = await prisma.deploymentConfig.findMany({
+              where: {
+                repositoryId: repository.id,
+                ...(targetEnvironment ? { environment: targetEnvironment } : {})
+              }
+            });
+
+            if (deploymentConfigs.length === 0) {
+              const envMsg = targetEnvironment ? ` for **${targetEnvironment}** environment` : '';
+              await addGitHubComment({
+                repositoryOwner: owner,
+                repositoryName: name,
+                issueNumber,
+                body: `❌ @${commentAuthor} No deployment configurations found${envMsg}.`
+              });
+              return;
+            }
+
+            // Queue deployment jobs
+            const queuedJobs = [];
+            for (const config of deploymentConfigs) {
+              const { jobId } = await enqueueDeploymentJob({
+                label: `${owner}/${name}:${config.environment}:${config.configPath}`,
+                payload: {
+                  repositoryOwner: owner,
+                  repositoryName: name,
+                  environment: config.environment as "dev" | "stage" | "prod",
+                  commitSha: latestCommitSha,
+                  triggeredBy: commentAuthor,
+                  caddyHost: appConfig.AUTO_DEPLOY_CADDY_HOST,
+                  configPath: config.configPath,
+                  config: config.parsedJson as any,
+                  dryRun: false
+                }
+              });
+              queuedJobs.push({ environment: config.environment, jobId });
+            }
+
+            // Post success message
+            const jobList = queuedJobs.map(j => `- **${j.environment}**: Job #${j.jobId}`).join('\n');
+            const envSuffix = targetEnvironment ? ` to **${targetEnvironment}**` : ' to all environments';
             await addGitHubComment({
               repositoryOwner: owner,
               repositoryName: name,
               issueNumber,
-              body: "❌ Please specify environment: `/bot redeploy <dev|stage|prod>`"
+              body: `✅ **Redeploy Triggered${envSuffix}**\n\n@${commentAuthor} queued deployment of commit \`${latestCommitSha.slice(0, 7)}\` from \`${defaultBranch}\` branch:\n\n${jobList}`
+            });
+
+            app.log.info(
+              { repositoryFullName, queuedJobs, triggeredBy: commentAuthor, targetEnvironment },
+              "Successfully queued redeploy jobs via bot command"
+            );
+          } catch (error) {
+            app.log.error(
+              { error, repositoryFullName, issueNumber },
+              "Failed to process /bot redeploy command"
+            );
+            await addGitHubComment({
+              repositoryOwner: owner,
+              repositoryName: name,
+              issueNumber,
+              body: `❌ Failed to process redeploy command. Please check logs or try again.`
+            });
+          }
+          break;
+
+        case 'reinitialize':
+          if (!isInitialized) {
+            await addGitHubComment({
+              repositoryOwner: owner,
+              repositoryName: name,
+              issueNumber,
+              body: "⚠️ Repository is not initialized. Use `/bot initialize` instead."
             });
             return;
           }
@@ -993,17 +1176,50 @@ Reply to this issue with a command to get started!`;
             repositoryOwner: owner,
             repositoryName: name,
             issueNumber,
-            body: `🔄 Triggering redeploy to **${arg}** environment...`
+            body: "🔄 Starting reinitialization...\n\n1️⃣ Cleaning up existing Nebula clients...\n2️⃣ Clearing repository state...\n3️⃣ Running initialization..."
           });
 
-          // Trigger deployment via deployment-runner
-          // Note: This would need proper implementation with deployment queue
+          // Step 1: Clean up Nebula clients and secrets
+          const reinitCleanupResult = await cleanupRepository({
+            owner,
+            name,
+            reason: "Reinitialization via bot command",
+            logger: app.log
+          });
+
           await addGitHubComment({
             repositoryOwner: owner,
             repositoryName: name,
             issueNumber,
-            body: `⚠️ Redeploy command is not yet fully implemented. Please use GitHub labels or push to trigger deployments.`
+            body: `✅ Cleanup complete!\n\n- Configs deleted: ${reinitCleanupResult.deletedConfigs}\n- Secrets deleted: ${reinitCleanupResult.deletedSecrets}\n- Secrets/variables cleaned: ${reinitCleanupResult.secretsCleanup.deleted}\n- Nebula clients deprovisioned: ${reinitCleanupResult.nebulaResults.filter(r => r.success).length}\n\n🚀 Starting initialization..."`
           });
+
+          // Step 2: Run initialization
+          const reinitResult = await initializeRepository({
+            repositoryOwner: owner,
+            repositoryName: name,
+            existingIssue: {
+              number: issueNumber,
+              html_url: payload.issue.html_url,
+              node_id: payload.issue.node_id
+            }
+          });
+
+          if (reinitResult.success) {
+            await addGitHubComment({
+              repositoryOwner: owner,
+              repositoryName: name,
+              issueNumber,
+              body: `✅ Reinitialization complete!\n\n- Issue: #${reinitResult.issueNumber}\n- PR: #${reinitResult.prNumber}\n\nAll Nebula clients regenerated. Check the PR for updated configuration templates.`
+            });
+          } else {
+            await addGitHubComment({
+              repositoryOwner: owner,
+              repositoryName: name,
+              issueNumber,
+              body: `⚠️ Cleanup succeeded but initialization failed: ${reinitResult.error}\n\nYou may need to run \`/bot initialize\` manually.`
+            });
+          }
           break;
 
         case 'uninitialize':
@@ -1086,12 +1302,149 @@ Reply to this issue with a command to get started!`;
             return;
           }
 
-          await addGitHubComment({
+          // Post initial "deleting" comment with image only
+          const deletingImageUrl = `${appConfig.APP_PUBLIC_BASE_URL.replace(/\/$/, "")}/images/deleting_server_github.webp`;
+          const statusCommentId = await addGitHubComment({
             repositoryOwner: owner,
             repositoryName: name,
             issueNumber,
-            body: `⚠️ VM deletion via bot command is not yet implemented. Please use the Virtualizor admin panel or API directly.`
+            body: `![Deleting Server](${deletingImageUrl})`
           });
+
+          app.log.info(
+            { repositoryFullName, environment: arg, vmId: vm.id, virtualizorVmId: vm.virtualizorVmId },
+            "Deleting VM via bot command"
+          );
+
+          try {
+            // Delete VM via Virtualizor API (if VM ID exists)
+            if (vm.virtualizorVmId) {
+              const deleteResult = await deleteVirtualizorVm({
+                vmId: vm.virtualizorVmId,
+                dryRun: false
+              });
+
+              if (!deleteResult.success) {
+                await updateGitHubComment({
+                  repositoryOwner: owner,
+                  repositoryName: name,
+                  commentId: statusCommentId,
+                  body: `❌ Failed to delete VM from Virtualizor: ${deleteResult.error}`
+                });
+                return;
+              }
+
+              app.log.info({ repositoryFullName, vmId: vm.id }, "VM deleted from Virtualizor, starting cleanup");
+            } else {
+              app.log.info(
+                { repositoryFullName, vmId: vm.id },
+                "No Virtualizor VM ID found, skipping API deletion (cleaning up database record only)"
+              );
+            }
+
+            // Cleanup Caddy configs
+            let caddyCleanupMsg = "";
+            try {
+              const latestDeployment = await prisma.deployment.findFirst({
+                where: {
+                  repositoryId: repository.id,
+                  environment: arg,
+                  status: "success"
+                },
+                orderBy: { finishedAt: "desc" },
+                take: 1,
+                include: {
+                  caddyReleases: {
+                    orderBy: { createdAt: "desc" },
+                    take: 1
+                  }
+                }
+              });
+
+              if (latestDeployment && latestDeployment.caddyReleases.length > 0) {
+                const caddyRelease = latestDeployment.caddyReleases[0];
+                const caddyFileNames = caddyRelease.deployedFiles as string[];
+
+                if (caddyFileNames && caddyFileNames.length > 0) {
+                  const cleanupResult = await removeCaddyConfig({
+                    caddyHost: appConfig.AUTO_DEPLOY_CADDY_HOST,
+                    fileNames: caddyFileNames,
+                    sshUser: appConfig.CADDY_SSH_USER,
+                    sshKeyPath: appConfig.CADDY_SSH_KEY_PATH,
+                    sshPort: appConfig.CADDY_SSH_PORT,
+                    remoteConfigDir: appConfig.CADDY_CONFIG_DIR,
+                    reloadCommand: appConfig.CADDY_RELOAD_COMMAND
+                  });
+                  caddyCleanupMsg = `\n- Caddy configs removed: ${caddyFileNames.length}`;
+                }
+              }
+            } catch (caddyError) {
+              app.log.error({ error: caddyError, vmId: vm.id }, "Failed to cleanup Caddy configs");
+              caddyCleanupMsg = "\n- ⚠️ Caddy cleanup failed (may need manual cleanup)";
+            }
+
+            // Revoke Nebula certificate
+            let nebulaCertMsg = "";
+            try {
+              const nebulaResult = await revokeNebulaCertificate({
+                repositoryOwner: owner,
+                repositoryName: name,
+                environment: arg as "dev" | "stage" | "prod"
+              });
+
+              if (nebulaResult.success) {
+                nebulaCertMsg = "\n- Nebula certificate revoked";
+              } else {
+                nebulaCertMsg = "\n- ⚠️ Nebula certificate revocation failed";
+              }
+            } catch (nebulaError) {
+              app.log.error({ error: nebulaError, vmId: vm.id }, "Failed to revoke Nebula certificate");
+              nebulaCertMsg = "\n- ⚠️ Nebula certificate revocation failed";
+            }
+
+            // Cancel VM approvals
+            const approvalUpdate = await prisma.vmApprovalRequest.updateMany({
+              where: {
+                repositoryId: repository.id,
+                vmHostname: vm.vmHostname,
+                status: { in: ["pending", "approved"] }
+              },
+              data: {
+                status: "cancelled"
+              }
+            });
+
+            // Delete VM from database
+            await prisma.vm.delete({
+              where: { id: vm.id }
+            });
+
+            // Update comment with "server deleted" image and results
+            const deletedImageUrl = `${appConfig.APP_PUBLIC_BASE_URL.replace(/\/$/, "")}/images/server_deleted_github.webp`;
+            await updateGitHubComment({
+              repositoryOwner: owner,
+              repositoryName: name,
+              commentId: statusCommentId,
+              body: `![Server Deleted](${deletedImageUrl})\n\n✅ VM deleted successfully!\n\n**Environment:** ${arg}\n**VM:** \`${vm.vmHostname}\`${caddyCleanupMsg}${nebulaCertMsg}\n- VM approvals cancelled: ${approvalUpdate.count}`
+            });
+
+            app.log.info(
+              { repositoryFullName, environment: arg, vmId: vm.id },
+              "VM deletion completed successfully via bot command"
+            );
+          } catch (error) {
+            app.log.error(
+              { error, repositoryFullName, vmId: vm.id },
+              "Failed to delete VM via bot command"
+            );
+            // Update the status comment with error message
+            await updateGitHubComment({
+              repositoryOwner: owner,
+              repositoryName: name,
+              commentId: statusCommentId,
+              body: `❌ Failed to delete VM: ${error instanceof Error ? error.message : "Unknown error"}`
+            });
+          }
           break;
 
         default:
@@ -1099,7 +1452,7 @@ Reply to this issue with a command to get started!`;
             repositoryOwner: owner,
             repositoryName: name,
             issueNumber,
-            body: `❌ Unknown command: \`${command}\`. Available commands: initialize, redeploy, uninitialize, delete-vm`
+            body: `❌ Unknown command: \`${command}\`. Available commands: initialize, reinitialize, redeploy, uninitialize, delete-vm`
           });
       }
     } catch (error) {

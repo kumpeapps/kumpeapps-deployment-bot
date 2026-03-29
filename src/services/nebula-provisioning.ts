@@ -1,6 +1,7 @@
 import { recordAuditEvent } from "./audit.js";
 import { appConfig } from "../config.js";
 import { getGitHubToken } from "./github-app-auth.js";
+import { prisma } from "../db.js";
 import naclUtil from "tweetnacl-util";
 import sealedBox from "tweetnacl-sealedbox-js";
 
@@ -34,7 +35,14 @@ interface NebulaClientResponse {
   is_lighthouse: boolean;
   is_blocked: boolean;
   created_at: string;
-  current_certificate_id?: number; // Certificate ID for revocation
+}
+
+interface NebulaCertificate {
+  fingerprint: string;
+  not_after: string; // Expiration date
+  not_before: string; // Issue date
+  revoked_at: string | null; // ISO timestamp if revoked, null if active
+  revocation_reason?: string;
 }
 
 interface ProvisionResult {
@@ -50,11 +58,27 @@ interface ProvisionResult {
 /**
  * Make authenticated API request to Managed Nebula
  */
+// Overload: when allow404 is true, can return null
+async function nebulaApiCall<T>(
+  endpoint: string,
+  method: string,
+  body: any,
+  options: { allow404: true }
+): Promise<T | null>;
+// Overload: when allow404 is false/undefined, always returns T  
+async function nebulaApiCall<T>(
+  endpoint: string,
+  method?: string,
+  body?: any,
+  options?: { allow404?: false }
+): Promise<T>;
+// Implementation
 async function nebulaApiCall<T>(
   endpoint: string,
   method: string = "GET",
-  body?: any
-): Promise<T> {
+  body?: any,
+  options?: { allow404?: boolean }
+): Promise<T | null> {
   if (!appConfig.MANAGED_NEBULA_API_URL || !appConfig.MANAGED_NEBULA_API_KEY) {
     throw new Error("Managed Nebula API is not configured");
   }
@@ -73,6 +97,11 @@ async function nebulaApiCall<T>(
   });
 
   if (!response.ok) {
+    // Allow 404 to be treated as success in certain operations
+    if (response.status === 404 && options?.allow404) {
+      return null;
+    }
+    
     const errorText = await response.text();
     throw new Error(
       `Managed Nebula API error (${response.status}): ${errorText}`
@@ -458,7 +487,7 @@ export async function provisionNebulaClients(input: {
         clientId: client.id,
         clientName: client.name,
         ipAddress: client.ip_address,
-        token: client.token
+        token: client.token.trim()
       });
 
       // Record audit event for successful provisioning
@@ -485,7 +514,7 @@ export async function provisionNebulaClients(input: {
         repositoryOwner: input.repositoryOwner,
         repositoryName: input.repositoryName,
         secretName: `${envPrefix}_NEBULA_CLIENT_TOKEN`,
-        secretValue: client.token
+        secretValue: client.token.trim()
       });
 
       if (tokenResult.success) {
@@ -524,7 +553,7 @@ export async function provisionNebulaClients(input: {
         repositoryOwner: input.repositoryOwner,
         repositoryName: input.repositoryName,
         secretName: `${envPrefix}_NEBULA_IP`,
-        secretValue: client.ip_address
+        secretValue: client.ip_address.trim()
       });
 
       if (ipResult.success) {
@@ -563,7 +592,7 @@ export async function provisionNebulaClients(input: {
         repositoryOwner: input.repositoryOwner,
         repositoryName: input.repositoryName,
         variableName: `${envPrefix}_NEBULA_IP`,
-        variableValue: client.ip_address
+        variableValue: client.ip_address.trim()
       });
 
       if (ipVarResult.success) {
@@ -595,6 +624,58 @@ export async function provisionNebulaClients(input: {
             error: ipVarResult.error
           }
         });
+      }
+
+      // Store tokens in bot's database for deployment use
+      const repository = await prisma.repository.findUnique({
+        where: {
+          owner_name: {
+            owner: input.repositoryOwner,
+            name: input.repositoryName
+          }
+        }
+      });
+
+      if (repository) {
+        // Store Nebula client token
+        await prisma.repositorySecret.upsert({
+          where: {
+            repositoryId_name: {
+              repositoryId: repository.id,
+              name: `${envPrefix}_NEBULA_CLIENT_TOKEN`
+            }
+          },
+          create: {
+            repositoryId: repository.id,
+            name: `${envPrefix}_NEBULA_CLIENT_TOKEN`,
+            value: client.token.trim()
+          },
+          update: {
+            value: client.token.trim()
+          }
+        } as any);
+
+        // Store Nebula IP address
+        await prisma.repositorySecret.upsert({
+          where: {
+            repositoryId_name: {
+              repositoryId: repository.id,
+              name: `${envPrefix}_NEBULA_IP`
+            }
+          },
+          create: {
+            repositoryId: repository.id,
+            name: `${envPrefix}_NEBULA_IP`,
+            value: client.ip_address.trim()
+          },
+          update: {
+            value: client.ip_address.trim()
+          }
+        } as any);
+
+        console.log(`[Nebula] Stored secrets in database for ${environment} environment`);
+      } else {
+        console.warn(`[Nebula] Repository not found in database: ${input.repositoryOwner}/${input.repositoryName}`);
       }
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : "Unknown error";
@@ -664,8 +745,17 @@ export async function deprovisionNebulaClients(input: {
       const client = findClientByName(clients, clientName);
 
       if (client) {
-        // Delete the client
-        await nebulaApiCall(`/api/v1/clients/${client.id}`, "DELETE");
+        // Delete the client (allow 404 if already deleted)
+        const deleteResult = await nebulaApiCall(
+          `/api/v1/clients/${client.id}`, 
+          "DELETE", 
+          undefined,
+          { allow404: true }
+        );
+
+        if (deleteResult === null) {
+          console.log(`[Nebula] Client ${clientName} was already deleted (404) - treating as success`);
+        }
 
         results.push({
           environment,
@@ -749,46 +839,36 @@ export async function revokeNebulaCertificate(input: {
 
   try {
     // Fetch and find the client by name
-    // Note: For single operations this is acceptable, but if revoking multiple
-    // certificates in a batch, consider fetching the list once and reusing it
     const clients = await fetchAllClients();
     const client = findClientByName(clients, clientName);
 
     if (!client) {
-      // Client doesn't exist - not an error
+      // Client doesn't exist - nothing to revoke (not an error)
+      console.log(`[Nebula] Client not found for revocation: ${clientName}`);
       return { success: true };
     }
 
-    // Get full client details to retrieve current certificate ID
-    const clientDetails = await nebulaApiCall<NebulaClientResponse>(
-      `/api/v1/clients/${client.id}`,
-      "GET"
+    // Revoke the current certificate
+    // Allow 404 since it means the client has no active certificate (already revoked or never issued)
+    console.log(`[Nebula] Revoking current certificate for client: ${clientName} (ID: ${client.id})`);
+    
+    const revokeResult = await nebulaApiCall(
+      `/api/v1/clients/${client.id}/certificates/revoke`,
+      "POST",
+      {
+        reason: "VM deleted - certificate no longer needed",
+        issue_new: false
+      },
+      { allow404: true }
     );
 
-    if (!clientDetails.current_certificate_id) {
-      // No certificate to revoke
-      await recordAuditEvent({
-        actorType: "system",
-        actorId: "nebula-provisioner",
-        action: "nebula.certificate.no_cert",
-        resourceType: "nebula_client",
-        resourceId: String(client.id),
-        payload: {
-          repositoryOwner: input.repositoryOwner,
-          repositoryName: input.repositoryName,
-          environment: input.environment,
-          clientName,
-          reason: "VM deleted - no active certificate found"
-        }
-      });
+    if (revokeResult === null) {
+      // 404 response - no active certificate to revoke (already revoked, expired, or never issued)
+      console.log(`[Nebula] No active certificate to revoke for ${clientName} (404) - treating as success`);
       return { success: true };
     }
 
-    // Revoke the certificate (client remains for future use)
-    await nebulaApiCall(
-      `/api/v1/clients/${client.id}/certificates/${clientDetails.current_certificate_id}/revoke`,
-      "POST"
-    );
+    console.log(`[Nebula] Successfully revoked certificate for ${clientName}`);
 
     await recordAuditEvent({
       actorType: "system",
@@ -801,14 +881,15 @@ export async function revokeNebulaCertificate(input: {
         repositoryName: input.repositoryName,
         environment: input.environment,
         clientName,
-        certificateId: clientDetails.current_certificate_id,
-        reason: "VM deleted - certificate revoked, client retained"
+        clientId: client.id,
+        reason: "VM deleted - certificate revoked, client retained for reuse"
       }
     });
 
     return { success: true };
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : "Unknown error";
+    console.error(`[Nebula] Certificate revocation failed for ${clientName}:`, errorMessage);
 
     await recordAuditEvent({
       actorType: "system",

@@ -42,7 +42,7 @@ export async function resolveRepositoryEnvValues(input: {
 
     for (const secret of secrets) {
       try {
-        byName.set(secret.name, decryptSecretValue(secret.value));
+        byName.set(secret.name, decryptSecretValue(secret.value).trim());
       } catch (error) {
         recordSecretDecryptFailure({
           repositoryId: secret.repositoryId,
