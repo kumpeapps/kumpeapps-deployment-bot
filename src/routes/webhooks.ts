@@ -19,7 +19,7 @@ import { addRepositoryCollaborator, acceptRepositoryInvitation, checkDirectoryEx
 import { recordInvalidWebhookSignature } from "../services/webhook-security-health.js";
 import { processApprovalComment } from "../services/vm-approval.js";
 import { removeCaddyConfig } from "../services/ssh-deployer.js";
-import { getGitHubToken } from "../services/github-app-auth.js";
+import { getGitHubToken, getInstallationTokenById } from "../services/github-app-auth.js";
 import { deleteVirtualizorVm } from "../services/virtualizor.js";
 
 // Module-level webhook processor for backfill support
@@ -412,48 +412,56 @@ export async function registerWebhookRoutes(
       repositories
     });
 
-    // Add kumpeapps-bot-deploy as collaborator to each repository
-    // This allows issues to be assigned to the bot for manual initialization
-    for (const repo of repositories) {
-      try {
-        await addRepositoryCollaborator({
-          repositoryOwner: repo.owner,
-          repositoryName: repo.name,
-          username: "kumpeapps-bot-deploy",
-          permission: "push"
-        });
-        app.log.info(
-          { owner: repo.owner, repo: repo.name },
-          "Added kumpeapps-bot-deploy as collaborator"
-        );
-
-        // Auto-accept the invitation (for personal repos where invitation is pending)
-        const accepted = await acceptRepositoryInvitation({
-          repositoryOwner: repo.owner,
-          repositoryName: repo.name
-        });
-        if (accepted) {
-          app.log.info(
-            { owner: repo.owner, repo: repo.name },
-            "Auto-accepted collaborator invitation for kumpeapps-bot-deploy"
-          );
-        }
-      } catch (error) {
-        app.log.warn(
-          { owner: repo.owner, repo: repo.name, error },
-          "Failed to add kumpeapps-bot-deploy as collaborator"
-        );
-      }
-    }
-
-    // NOTE: Initialization is now triggered by:
-    // 1. Assigning an issue to kumpeapps-bot-deploy and running `/bot initialize` command, OR
-    // 2. Creating a .kumpeapps-deploy-bot directory in the repo
-    // This allows org-wide installation without affecting all repos automatically.
     app.log.info(
       { repositories: repositories.map((r: { owner: string; name: string }) => `${r.owner}/${r.name}`) },
       "Installation created - awaiting initialization trigger (bot command or config directory)"
     );
+
+    // Process collaborator additions asynchronously to avoid blocking webhook response
+    // This prevents database connection timeouts when there are many repositories
+    setImmediate(async () => {
+      try {
+        const installationToken = await getInstallationTokenById(BigInt(payload.installation.id));
+
+        for (const repo of repositories) {
+          try {
+            await addRepositoryCollaborator({
+              repositoryOwner: repo.owner,
+              repositoryName: repo.name,
+              username: "kumpeapps-bot-deploy",
+              permission: "push",
+              token: installationToken ?? undefined
+            });
+            app.log.info(
+              { owner: repo.owner, repo: repo.name },
+              "Added kumpeapps-bot-deploy as collaborator"
+            );
+
+            // Auto-accept the invitation (for personal repos where invitation is pending)
+            const accepted = await acceptRepositoryInvitation({
+              repositoryOwner: repo.owner,
+              repositoryName: repo.name
+            });
+            if (accepted) {
+              app.log.info(
+                { owner: repo.owner, repo: repo.name },
+                "Auto-accepted collaborator invitation for kumpeapps-bot-deploy"
+              );
+            }
+          } catch (error) {
+            app.log.warn(
+              { owner: repo.owner, repo: repo.name, error },
+              "Failed to add kumpeapps-bot-deploy as collaborator"
+            );
+          }
+        }
+      } catch (error) {
+        app.log.error(
+          { installationId: payload.installation.id, error },
+          "Critical error in collaborator addition background task"
+        );
+      }
+    });
   });
 
   webhooks.on("installation.deleted", async ({ payload }: { payload: any }) => {
@@ -508,47 +516,49 @@ export async function registerWebhookRoutes(
       repositoriesRemoved: []
     });
 
-    // Add kumpeapps-bot-deploy as collaborator to enable issue assignment
-    for (const repo of repositoriesAdded) {
-      try {
-        await addRepositoryCollaborator({
-          repositoryOwner: repo.owner,
-          repositoryName: repo.name,
-          username: "kumpeapps-bot-deploy",
-          permission: "push"
-        });
-        app.log.info(
-          { owner: repo.owner, repo: repo.name },
-          "Added kumpeapps-bot-deploy as collaborator"
-        );
-
-        // Auto-accept the invitation (for personal repos where invitation is pending)
-        const accepted = await acceptRepositoryInvitation({
-          repositoryOwner: repo.owner,
-          repositoryName: repo.name
-        });
-        if (accepted) {
-          app.log.info(
-            { owner: repo.owner, repo: repo.name },
-            "Auto-accepted collaborator invitation for kumpeapps-bot-deploy"
-          );
-        }
-      } catch (error) {
-        app.log.warn(
-          { owner: repo.owner, repo: repo.name, error: String(error) },
-          "Failed to add kumpeapps-bot-deploy as collaborator - continuing"
-        );
-      }
-    }
-
-    // NOTE: Initialization is now triggered by:
-    // 1. Assigning an issue to kumpeapps-bot-deploy and running `/bot initialize` command, OR
-    // 2. Creating a .kumpeapps-deploy-bot directory in the repo
-    // This allows org-wide installation without affecting all repos automatically.
     app.log.info(
       { repositories: repositoriesAdded.map((r: { owner: string; name: string }) => `${r.owner}/${r.name}`) },
       "Repositories added to installation - awaiting initialization trigger"
     );
+
+    // Process collaborator additions asynchronously to avoid blocking webhook response
+    // This prevents database connection timeouts when there are many repositories
+    setImmediate(async () => {
+      const installationToken = await getInstallationTokenById(BigInt(payload.installation.id));
+
+      for (const repo of repositoriesAdded) {
+        try {
+          await addRepositoryCollaborator({
+            repositoryOwner: repo.owner,
+            repositoryName: repo.name,
+            username: "kumpeapps-bot-deploy",
+            permission: "push",
+            token: installationToken ?? undefined
+          });
+          app.log.info(
+            { owner: repo.owner, repo: repo.name },
+            "Added kumpeapps-bot-deploy as collaborator"
+          );
+
+          // Auto-accept the invitation (for personal repos where invitation is pending)
+          const accepted = await acceptRepositoryInvitation({
+            repositoryOwner: repo.owner,
+            repositoryName: repo.name
+          });
+          if (accepted) {
+            app.log.info(
+              { owner: repo.owner, repo: repo.name },
+              "Auto-accepted collaborator invitation for kumpeapps-bot-deploy"
+            );
+          }
+        } catch (error) {
+          app.log.warn(
+            { owner: repo.owner, repo: repo.name, error: String(error) },
+            "Failed to add kumpeapps-bot-deploy as collaborator - continuing"
+          );
+        }
+      }
+    });
   });
 
   webhooks.on("installation_repositories.removed", async ({ payload }: { payload: any }) => {

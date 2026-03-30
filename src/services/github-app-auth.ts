@@ -53,6 +53,53 @@ export function isGitHubAppAuthConfigured(): boolean {
 }
 
 /**
+ * Get an installation token directly from installation ID.
+ * Returns null if GitHub App auth is not configured.
+ * Useful when you already have the installation ID from a webhook payload.
+ */
+export async function getInstallationTokenById(installationId: bigint): Promise<string | null> {
+  if (!isGitHubAppAuthConfigured()) {
+    return null;
+  }
+
+  // Check cache first
+  const cached = tokenCache.get(installationId);
+  if (cached && cached.expiresAt > new Date()) {
+    return cached.token;
+  }
+
+  // Generate new token
+  try {
+    const privateKey = getPrivateKey();
+    if (!privateKey) {
+      return null;
+    }
+
+    const auth = createAppAuth({
+      appId: appConfig.GITHUB_APP_ID!,
+      privateKey: privateKey,
+      installationId: Number(installationId)
+    });
+
+    const { token, expiresAt } = await auth({ type: "installation" });
+
+    // Cache the token (subtract 5 minutes for safety margin)
+    const cacheExpiresAt = new Date(expiresAt);
+    cacheExpiresAt.setMinutes(cacheExpiresAt.getMinutes() - 5);
+
+    tokenCache.set(installationId, {
+      token,
+      expiresAt: cacheExpiresAt
+    });
+
+    return token;
+  } catch (error) {
+    console.error(`Failed to generate installation token for installation ${installationId}:`, error);
+    return null;
+  }
+}
+
+/**
  * Get an installation token for a specific repository.
  * Returns null if GitHub App auth is not configured or installation not found.
  */
@@ -81,43 +128,7 @@ export async function getInstallationToken(
     return null;
   }
 
-  const installationId = repo.installationId;
-
-  // Check cache first
-  const cached = tokenCache.get(installationId);
-  if (cached && cached.expiresAt > new Date()) {
-    return cached.token;
-  }
-
-  // Generate new token
-  try {
-    const privateKey = getPrivateKey();
-    if (!privateKey) {
-      return null;
-    }
-
-    const auth = createAppAuth({
-      appId: appConfig.GITHUB_APP_ID!,
-      privateKey: privateKey,
-      installationId: Number(installationId)
-    });
-
-    const { token, expiresAt } = await auth({ type: "installation" });
-
-    // Cache the token (subtract 5 minutes for safety margin)
-    const cacheExpiresAt = new Date(expiresAt);
-    cacheExpiresAt.setMinutes(cacheExpiresAt.getMinutes() - 5);
-
-    tokenCache.set(installationId, {
-      token,
-      expiresAt: cacheExpiresAt
-    });
-
-    return token;
-  } catch (error) {
-    console.error(`Failed to generate installation token for installation ${installationId}:`, error);
-    return null;
-  }
+  return getInstallationTokenById(repo.installationId);
 }
 
 /**
@@ -145,54 +156,6 @@ export async function getGitHubToken(
   // Fall back to static token
   console.log("[GitHub App Auth] Falling back to static GITHUB_API_TOKEN");
   return appConfig.GITHUB_API_TOKEN.trim();
-}
-
-/**
- * Get a GitHub API token directly by installation ID.
- * Useful for org-level operations without a specific repository.
- */
-export async function getInstallationTokenById(
-  installationId: bigint
-): Promise<string | null> {
-  if (!isGitHubAppAuthConfigured()) {
-    return null;
-  }
-
-  // Check cache first
-  const cached = tokenCache.get(installationId);
-  if (cached && cached.expiresAt > new Date()) {
-    return cached.token;
-  }
-
-  // Generate new token
-  try {
-    const privateKey = getPrivateKey();
-    if (!privateKey) {
-      return null;
-    }
-
-    const auth = createAppAuth({
-      appId: appConfig.GITHUB_APP_ID!,
-      privateKey: privateKey,
-      installationId: Number(installationId)
-    });
-
-    const { token, expiresAt } = await auth({ type: "installation" });
-
-    // Cache the token (subtract 5 minutes for safety margin)
-    const cacheExpiresAt = new Date(expiresAt);
-    cacheExpiresAt.setMinutes(cacheExpiresAt.getMinutes() - 5);
-
-    tokenCache.set(installationId, {
-      token,
-      expiresAt: cacheExpiresAt
-    });
-
-    return token;
-  } catch (error) {
-    console.error(`Failed to generate installation token for installation ${installationId}:`, error);
-    return null;
-  }
 }
 
 /**
