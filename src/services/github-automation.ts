@@ -896,14 +896,19 @@ export async function linkIssueToBranch(input: {
 
 /**
  * Add a collaborator to a repository
+ * Uses GitHub App installation token to create the invitation
+ * For kumpeapps-bot-deploy, the invitation is then accepted via acceptRepositoryInvitation()
+ * 
+ * @param token - Optional GitHub token. If not provided, will look up installation token from database.
  */
 export async function addRepositoryCollaborator(input: {
   repositoryOwner: string;
   repositoryName: string;
   username: string;
   permission?: "pull" | "push" | "admin" | "maintain" | "triage"; // defaults to push
+  token?: string; // Optional token to avoid database lookup
 }): Promise<void> {
-  const token = await getGitHubToken(input.repositoryOwner, input.repositoryName);
+  const token = input.token ?? await getGitHubToken(input.repositoryOwner, input.repositoryName);
   if (!token) {
     throw new Error("No GitHub token available");
   }

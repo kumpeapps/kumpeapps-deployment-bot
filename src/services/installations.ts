@@ -12,6 +12,8 @@ export async function upsertInstallation(input: {
   permissionsSnapshot: Record<string, string> | null;
   repositories: RepoInput[];
 }): Promise<void> {
+  // Use longer timeout for org-level installations with many repositories
+  // Default is 5s, but processing 50+ repos can easily exceed that
   await prisma.$transaction(async (tx) => {
     await tx.githubInstallation.upsert({
       where: { installationId: input.installationId },
@@ -65,6 +67,9 @@ export async function upsertInstallation(input: {
         }
       });
     }
+  }, {
+    maxWait: 60000, // 60 seconds - wait time for transaction to start
+    timeout: 60000  // 60 seconds - max time transaction can run
   });
 }
 
@@ -84,6 +89,7 @@ export async function upsertInstallationRepositories(input: {
   repositoriesAdded: RepoInput[];
   repositoriesRemoved: RepoInput[];
 }): Promise<void> {
+  // Use longer timeout for batch repository operations
   await prisma.$transaction(async (tx) => {
     // Ensure the installation record exists first to satisfy foreign key constraint
     await tx.githubInstallation.upsert({
@@ -129,5 +135,8 @@ export async function upsertInstallationRepositories(input: {
         data: { active: false }
       });
     }
+  }, {
+    maxWait: 60000, // 60 seconds
+    timeout: 60000  // 60 seconds
   });
 }
