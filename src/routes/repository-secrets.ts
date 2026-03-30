@@ -258,7 +258,9 @@ export async function registerRepositorySecretRoutes(
     const newSecretNames = new Set(bodyParsed.data.secrets.map(s => s.name));
     const secretsToDelete = existingSecrets.filter(s => !newSecretNames.has(s.name));
 
-    // Perform sync in a transaction
+    // Perform sync in a transaction with extended timeout
+    // Timeout increased to handle large secret sets (100ms per secret + 10s buffer)
+    const timeoutMs = Math.max(15000, bodyParsed.data.secrets.length * 100 + 10000);
     await prisma.$transaction(async (tx) => {
       // Delete secrets not in the new set
       if (secretsToDelete.length > 0) {
@@ -289,7 +291,7 @@ export async function registerRepositorySecretRoutes(
           }
         });
       }
-    });
+    }, { timeout: timeoutMs });
 
     await recordAuditEvent({
       actorType,
