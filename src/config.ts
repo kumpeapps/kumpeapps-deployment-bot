@@ -29,6 +29,7 @@ const envOptionalNumber = () =>
 
 const EnvSchema = z.object({
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
+  DEV: envBoolean().default(false),
   PORT: z.coerce.number().int().positive().default(3000),
   APP_PUBLIC_BASE_URL: z.string().url().default("http://localhost:3000"),
   LOG_LEVEL: z.enum(["fatal", "error", "warn", "info", "debug", "trace", "silent"]).default("info"),
@@ -139,6 +140,7 @@ const EnvSchema = z.object({
   GITHUB_WORKFLOW_CHECK_TIMEOUT_MS: z.coerce.number().int().positive().default(1800000), // 30 minutes
   GITHUB_WORKFLOW_CHECK_POLL_INTERVAL_MS: z.coerce.number().int().positive().default(10000), // 10 seconds
   GITHUB_DEPLOYMENTS_ENABLED: envBoolean().default(false),
+  GITHUB_COMMIT_STATUS_ENABLED: envBoolean().default(true),
   GITHUB_DEPLOYMENT_ERROR_ISSUES_ENABLED: envBoolean().default(true),
   SECRET_ENCRYPTION_KEY: z.string().min(16).default("change-this-secret-key"),
   SECRET_ENCRYPTION_PREVIOUS_KEYS: z.string().default(""),

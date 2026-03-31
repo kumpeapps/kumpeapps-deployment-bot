@@ -248,6 +248,10 @@ Phase 0 foundation has been scaffolded:
 10. Deployment query APIs:
 	- `GET /api/deployments?repositoryOwner=<owner>&repositoryName=<repo>&limit=20`
 	- `GET /api/deployments/:id`
+	- `GET /deployments/:id/status` - Public HTML page showing deployment status (no auth required)
+		- used as target URL for GitHub commit status checks
+		- displays deployment steps, logs, and real-time status
+		- auto-refreshes every 5 seconds while deployment is running
 11. Deployment job query APIs:
 	- `GET /api/deployment-jobs?status=queued|running|succeeded|failed&limit=50`
 	- `GET /api/deployment-jobs/:id`
@@ -312,7 +316,8 @@ Phase 0 foundation has been scaffolded:
 	- enqueues a durable deployment job and returns `jobId`
 	- stores `deployments` and `deployment_steps`
 	- optionally creates GitHub Deployment + statuses (`in_progress`, `success`, `failure`)
-	- when enabled, status updates include `log_url` pointing to `/api/deployments/:id`
+	- when enabled, status updates include `log_url` pointing to `/deployments/:id/status` (public HTML page)
+	- commit status checks include `target_url` pointing to `/deployments/:id/status`
 	- stores `secrets_resolution_audit` records from `env_mappings`
 	- stores `caddy_releases` records with caddy config checksums
 	- validates policy + user quotas + domains before execution
@@ -446,9 +451,12 @@ Access the web-based admin interface at `GET /admin` (GitHub OAuth login).
 	- `GET /metrics` includes rate-limit counters and alert flags (`rate_limit_*`)
 7. GitHub deployment status integration:
 	- `GITHUB_DEPLOYMENTS_ENABLED=true|false` to enable GitHub Deployments API status updates
-	- requires GitHub App authentication with Deployments: Write permission (or legacy `GITHUB_API_TOKEN`)
-	- set `APP_PUBLIC_BASE_URL` so GitHub `log_url` points to a reachable bot URL
+	- `GITHUB_COMMIT_STATUS_ENABLED=true|false` to enable commit status checks (shows on PRs/commits, enabled by default)
+	- requires GitHub App authentication with Deployments: Write and Commit statuses: Write permissions (or legacy `GITHUB_API_TOKEN`)
+	- set `APP_PUBLIC_BASE_URL` so GitHub `log_url` and `target_url` point to a reachable bot URL
 	- stores GitHub deployment ID in `deployments.github_deployment_id`
+	- commit status checks only appear when deployments are triggered (not on every commit)
+	- status context format: `kumpeapps-bot/deployment/{environment}`
 	- `GET /health` includes `githubApi` stats (consecutive failures, circuit open state, final failure counts, alert flags)
 	- `GET /metrics` includes GitHub API counters and alert flags (`github_api_*`)
 8. SSH execution observability:
