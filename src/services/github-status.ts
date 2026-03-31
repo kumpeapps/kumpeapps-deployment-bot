@@ -407,6 +407,43 @@ export async function updateGithubDeploymentStatus(input: {
 }
 
 /**
+ * GitHub Commit Status state (for traditional status checks on commits/PRs)
+ */
+type GithubCommitStatusState =
+  | "pending"
+  | "success"
+  | "failure"
+  | "error";
+
+/**
+ * Creates or updates a commit status check on a commit.
+ * This shows up as a status check on PRs and commits.
+ * Silently no-ops when commit status checks are disabled.
+ */
+export async function updateCommitStatus(input: {
+  repositoryOwner: string;
+  repositoryName: string;
+  commitSha: string;
+  state: GithubCommitStatusState;
+  context: string;
+  description?: string;
+  targetUrl?: string;
+}): Promise<void> {
+  if (!appConfig.GITHUB_COMMIT_STATUS_ENABLED) {
+    return;
+  }
+
+  const path = `/repos/${encodeURIComponent(input.repositoryOwner)}/${encodeURIComponent(input.repositoryName)}/statuses/${input.commitSha}`;
+
+  await githubPost(path, {
+    state: input.state,
+    context: input.context,
+    description: input.description?.slice(0, 140), // GitHub limit is 140 chars
+    target_url: input.targetUrl
+  }, input.repositoryOwner, input.repositoryName);
+}
+
+/**
  * Makes a GET request to GitHub API with retry logic and circuit breaker.
  */
 async function githubGet<T>(path: string, repositoryOwner: string, repositoryName: string): Promise<T | null> {

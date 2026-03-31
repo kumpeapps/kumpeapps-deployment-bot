@@ -12,7 +12,7 @@ import {
 import { compensateComposeOnVm, deployCaddyConfig, deployComposeToVm } from "./ssh-deployer.js";
 import { resolveRepositoryEnvValues } from "./repository-secrets.js";
 import { ensureVirtualizorVm, resolvePlanDetails } from "./virtualizor.js";
-import { createGithubDeployment, updateGithubDeploymentStatus, waitForWorkflowsToComplete, reportDeploymentError, closeDeploymentErrorIssue } from "./github-status.js";
+import { createGithubDeployment, updateGithubDeploymentStatus, updateCommitStatus, waitForWorkflowsToComplete, reportDeploymentError, closeDeploymentErrorIssue } from "./github-status.js";
 import { recordDeploymentCompensationEvent } from "./deployment-compensation-health.js";
 import { buildVmHostname, checkVmApprovalStatus, createVmApprovalRequest } from "./vm-approval.js";
 import { getGitHubToken } from "./github-app-auth.js";
@@ -110,7 +110,39 @@ async function auditSecretMappings(
 }
 
 function deploymentLogUrl(deploymentId: number): string {
-  return `${appConfig.APP_PUBLIC_BASE_URL.replace(/\/$/, "")}/api/deployments/${deploymentId}`;
+  return `${appConfig.APP_PUBLIC_BASE_URL.replace(/\/$/, "")}/deployments/${deploymentId}/status`;
+}
+
+/**
+ * Helper to centralize commit status updates for deployments
+ */
+async function setDeploymentCommitStatus(
+  input: {
+    repositoryOwner: string;
+    repositoryName: string;
+    commitSha: string;
+    environment: string;
+  },
+  options: {
+    state: "pending" | "success" | "failure";
+    description: string;
+    deploymentId?: number;
+    targetUrlOverride?: string;
+  }
+): Promise<void> {
+  const targetUrl =
+    options.targetUrlOverride ??
+    (options.deploymentId ? deploymentLogUrl(options.deploymentId) : appConfig.APP_PUBLIC_BASE_URL);
+
+  await updateCommitStatus({
+    repositoryOwner: input.repositoryOwner,
+    repositoryName: input.repositoryName,
+    commitSha: input.commitSha,
+    state: options.state,
+    context: `kumpeapps-bot/deployment/${input.environment}`,
+    description: options.description,
+    targetUrl,
+  });
 }
 
 type CompensationActionName = "vm.compose_down";
@@ -330,6 +362,13 @@ export async function executeDeployment(input: ExecuteDeploymentInput): Promise<
     throw new Error("Repository not found in control plane");
   }
 
+  // Create commit status check immediately so it shows even if deployment fails authorization
+  // This ensures status checks appear when deployment is triggered, regardless of outcome
+  await setDeploymentCommitStatus(input, {
+    state: "pending",
+    description: `Deploying to ${input.environment}...`
+  });
+
   const assignedUsername = input.config.assigned_username.trim().toLowerCase();
   const user = await prisma.user.findUnique({
     where: { githubUsername: assignedUsername },
@@ -341,7 +380,15 @@ export async function executeDeployment(input: ExecuteDeploymentInput): Promise<
   });
 
   if (!user || user.status !== "approved") {
-    throw new Error("Assigned user is not approved");
+    const errorMessage = "Assigned user is not approved";
+    
+    // Update commit status to failure
+    await setDeploymentCommitStatus(input, {
+      state: "failure",
+      description: errorMessage
+    });
+    
+    throw new Error(errorMessage);
   }
 
   // Build VM hostname from config with intelligent username and env prefixing
@@ -385,6 +432,12 @@ export async function executeDeployment(input: ExecuteDeploymentInput): Promise<
   if (policyErrors.length > 0) {
     const errorMessage = `Policy validation failed: ${policyErrors.join("; ")}`;
     
+    // Update commit status to failure
+    await setDeploymentCommitStatus(input, {
+      state: "failure",
+      description: "Policy validation failed"
+    });
+    
     // Report policy error as GitHub issue before throwing
     if (appConfig.GITHUB_DEPLOYMENT_ERROR_ISSUES_ENABLED) {
       try {
@@ -414,7 +467,15 @@ export async function executeDeployment(input: ExecuteDeploymentInput): Promise<
 
   if (!input.dryRun && resolvedSecrets.unresolved.length > 0) {
     const missing = resolvedSecrets.unresolved.map((item) => `${item.envKey}:${item.secretName}`).join(", ");
-    throw new Error(`Missing repository secret values for env mappings: ${missing}`);
+    const errorMessage = `Missing repository secret values for env mappings: ${missing}`;
+    
+    // Update commit status to failure
+    await setDeploymentCommitStatus(input, {
+      state: "failure",
+      description: "Missing required secrets"
+    });
+    
+    throw new Error(errorMessage);
   }
 
   const deploymentKey = createHash("sha256")
@@ -489,6 +550,13 @@ export async function executeDeployment(input: ExecuteDeploymentInput): Promise<
       logUrl
     });
   }
+
+  // Update commit status with deployment log URL now that we have a deployment ID
+  await setDeploymentCommitStatus(input, {
+    state: "pending",
+    description: `Deploying to ${input.environment}...`,
+    deploymentId: deployment.id
+  });
 
   await recordAuditEvent({
     actorType: "system",
@@ -817,7 +885,7 @@ export async function executeDeployment(input: ExecuteDeploymentInput): Promise<
           deployedCaddyFiles = result.deployedFiles;
           return result;
         },
-        (result) => result.message
+        "Caddy configuration deployed successfully"
       );
 
       await runStep(deployment.id, "caddy.persist_release", async () => {
@@ -850,6 +918,13 @@ export async function executeDeployment(input: ExecuteDeploymentInput): Promise<
         logUrl: deploymentLogUrl(deployment.id)
       });
     }
+
+    // Update commit status to success
+    await setDeploymentCommitStatus(input, {
+      state: "success",
+      description: `Deployed to ${input.environment}`,
+      deploymentId: deployment.id
+    });
 
     await recordAuditEvent({
       actorType: "system",
@@ -929,6 +1004,13 @@ export async function executeDeployment(input: ExecuteDeploymentInput): Promise<
         description: error instanceof Error ? error.message.slice(0, 140) : "deployment failed"
       });
     }
+
+    // Update commit status to failure
+    await setDeploymentCommitStatus(input, {
+      state: "failure",
+      description: `Deployment to ${input.environment} failed`,
+      deploymentId: deployment.id
+    });
 
     await recordAuditEvent({
       actorType: "system",

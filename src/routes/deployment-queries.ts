@@ -7,6 +7,12 @@ import { recordAuditEvent } from "../services/audit.js";
 import { requeueDeploymentJob, deploymentQueueDetailedStats } from "../services/deployment-queue.js";
 import { pruneExpiredSnoozesRecords } from "../services/alert-snooze-cleanup.js";
 import { pruneOldDeploymentJobs } from "../services/deployment-job-cleanup.js";
+import {
+  buildDeploymentStatusView,
+  buildStepsHtml,
+  buildDeploymentStatusHtml,
+  buildNotFoundHtml
+} from "../services/deployment-status-view.js";
 
 const DeploymentListQuerySchema = z.object({
   repositoryOwner: z.string().min(1).max(255),
@@ -95,6 +101,42 @@ export async function registerDeploymentQueryRoutes(
       count: deployments.length,
       deployments
     });
+  });
+
+  // Public endpoint for viewing deployment status (no auth required)
+  // Used as target URL for GitHub commit status checks
+  app.get("/deployments/:id/status", async (request, reply) => {
+    const paramsParsed = DeploymentDetailParamsSchema.safeParse(request.params);
+    if (!paramsParsed.success) {
+      return reply.code(400).send({ error: "Invalid deployment ID" });
+    }
+
+    const deployment = await prisma.deployment.findUnique({
+      where: { id: paramsParsed.data.id },
+      include: {
+        repository: true,
+        steps: {
+          orderBy: { startedAt: "asc" }
+        }
+      }
+    });
+
+    if (!deployment) {
+      return reply.code(404).type("text/html; charset=utf-8").send(
+        buildNotFoundHtml(paramsParsed.data.id)
+      );
+    }
+
+    const { storyboardImage, status } = buildDeploymentStatusView(deployment);
+    const stepsHtml = buildStepsHtml(deployment.steps);
+    const html = buildDeploymentStatusHtml({
+      deployment,
+      storyboardImage,
+      status,
+      stepsHtml
+    });
+
+    return reply.type("text/html; charset=utf-8").send(html);
   });
 
   app.get("/api/deployments/:id", async (request, reply) => {

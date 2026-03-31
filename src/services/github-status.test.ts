@@ -6,7 +6,8 @@ import {
   createGithubDeployment,
   githubApiHealthStats,
   githubApiPrometheusMetrics,
-  updateGithubDeploymentStatus
+  updateGithubDeploymentStatus,
+  updateCommitStatus
 } from "./github-status.js";
 
 type FetchCall = {
@@ -26,6 +27,7 @@ function makeJsonResponse(status: number, body: unknown): Response {
 afterEach(() => {
   globalThis.fetch = originalFetch;
   appConfig.GITHUB_DEPLOYMENTS_ENABLED = false;
+  appConfig.GITHUB_COMMIT_STATUS_ENABLED = true;
   appConfig.GITHUB_API_TOKEN = "";
   appConfig.GITHUB_API_POST_MAX_RETRIES = 2;
   appConfig.GITHUB_API_POST_RETRY_BASE_DELAY_MS = 1;
@@ -178,6 +180,88 @@ describe("updateGithubDeploymentStatus", () => {
     assert.equal(body.state, "success");
     assert.equal(body.description, "all good");
     assert.equal(body.log_url, "https://deploy-bot.example.com/api/deployments/42");
+  });
+});
+
+describe("updateCommitStatus", () => {
+  it("does not call fetch when disabled", async () => {
+    appConfig.GITHUB_COMMIT_STATUS_ENABLED = false;
+
+    let called = false;
+    globalThis.fetch = (async () => {
+      called = true;
+      return makeJsonResponse(201, {});
+    }) as typeof fetch;
+
+    await updateCommitStatus({
+      repositoryOwner: "kumpeapps",
+      repositoryName: "repo",
+      commitSha: "abc123",
+      state: "pending",
+      context: "kumpeapps-bot/deployment/dev"
+    });
+
+    assert.equal(called, false);
+  });
+
+  it("posts commit status when enabled", async () => {
+    appConfig.GITHUB_COMMIT_STATUS_ENABLED = true;
+
+    const calls: FetchCall[] = [];
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      calls.push({ input, init });
+      return makeJsonResponse(201, { id: 789 });
+    }) as typeof fetch;
+
+    await updateCommitStatus({
+      repositoryOwner: "kumpeapps",
+      repositoryName: "repo",
+      commitSha: "deadbeef123",
+      state: "success",
+      context: "kumpeapps-bot/deployment/prod",
+      description: "Deployed successfully to prod",
+      targetUrl: "https://bot.example.com/api/deployments/42"
+    });
+
+    assert.equal(calls.length, 1);
+    const url = String(calls[0].input);
+    assert.ok(url.includes("/repos/kumpeapps/repo/statuses/deadbeef123"));
+
+    const body = JSON.parse(String(calls[0].init?.body ?? "{}")) as {
+      state?: string;
+      context?: string;
+      description?: string;
+      target_url?: string;
+    };
+    assert.equal(body.state, "success");
+    assert.equal(body.context, "kumpeapps-bot/deployment/prod");
+    assert.equal(body.description, "Deployed successfully to prod");
+    assert.equal(body.target_url, "https://bot.example.com/api/deployments/42");
+  });
+
+  it("truncates description to 140 characters", async () => {
+    appConfig.GITHUB_COMMIT_STATUS_ENABLED = true;
+
+    const calls: FetchCall[] = [];
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      calls.push({ input, init });
+      return makeJsonResponse(201, {});
+    }) as typeof fetch;
+
+    const longDescription = "a".repeat(200);
+    await updateCommitStatus({
+      repositoryOwner: "kumpeapps",
+      repositoryName: "repo",
+      commitSha: "abc123",
+      state: "pending",
+      context: "kumpeapps-bot/deployment/dev",
+      description: longDescription
+    });
+
+    const body = JSON.parse(String(calls[0].init?.body ?? "{}")) as {
+      description?: string;
+    };
+    assert.equal(body.description?.length, 140);
   });
 });
 

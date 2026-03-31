@@ -292,7 +292,9 @@ export async function registerAdminDashboardRoutes(app: FastifyInstance): Promis
   // Serve logo for admin dashboard
   app.get("/logo.webp", async (_request, reply) => {
     try {
-      const logoPath = join(currentDir, "..", "..", "public", "logo.webp");
+      const { appConfig } = await import("../config.js");
+      const logoFilename = appConfig.DEV ? "logo-dev.webp" : "logo.webp";
+      const logoPath = join(currentDir, "..", "..", "public", logoFilename);
       const logo = await readFile(logoPath);
       return reply.type("image/webp").send(logo);
     } catch (error) {
@@ -301,20 +303,22 @@ export async function registerAdminDashboardRoutes(app: FastifyInstance): Promis
   });
 
   // Serve images from public/images directory
-  app.get("/images/:filename", async (request, reply) => {
+  app.get("/images/*", async (request, reply) => {
     try {
-      const { filename } = request.params as { filename: string };
+      const fullPath = (request.params as { '*': string })['*'];
       
-      // Security: prevent path traversal
-      if (filename.includes("..") || filename.includes("/") || filename.includes("\\")) {
-        return reply.code(400).send({ error: "Invalid filename" });
+      // Security: prevent path traversal attacks
+      // - Reject paths containing ".." to prevent directory traversal
+      // - Reject paths starting with "/" or "\" to prevent absolute path exploits
+      if (fullPath.includes("..") || fullPath.startsWith("/") || fullPath.startsWith("\\")) {
+        return reply.code(400).send({ error: "Invalid path" });
       }
 
-      const imagePath = join(currentDir, "..", "..", "public", "images", filename);
+      const imagePath = join(currentDir, "..", "..", "public", "images", fullPath);
       const imageData = await readFile(imagePath);
       
       // Determine content type based on file extension
-      const ext = filename.split(".").pop()?.toLowerCase();
+      const ext = fullPath.split(".").pop()?.toLowerCase();
       const contentType = ext === "png" ? "image/png" :
                          ext === "jpg" || ext === "jpeg" ? "image/jpeg" :
                          ext === "gif" ? "image/gif" :
