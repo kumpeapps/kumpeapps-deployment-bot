@@ -458,26 +458,6 @@ export async function executeDeployment(input: ExecuteDeploymentInput): Promise<
     throw new Error(errorMessage);
   }
 
-  const resolvedSecrets = await resolveRepositoryEnvValues({
-    repositoryId: repository.id,
-    repositoryOwner: input.repositoryOwner,
-    repositoryName: input.repositoryName,
-    envMappings: input.config.env_mappings
-  });
-
-  if (!input.dryRun && resolvedSecrets.unresolved.length > 0) {
-    const missing = resolvedSecrets.unresolved.map((item) => `${item.envKey}:${item.secretName}`).join(", ");
-    const errorMessage = `Missing repository secret values for env mappings: ${missing}`;
-    
-    // Update commit status to failure
-    await setDeploymentCommitStatus(input, {
-      state: "failure",
-      description: "Missing required secrets"
-    });
-    
-    throw new Error(errorMessage);
-  }
-
   const deploymentKey = createHash("sha256")
     .update(
       JSON.stringify({
@@ -615,7 +595,26 @@ export async function executeDeployment(input: ExecuteDeploymentInput): Promise<
       },
       (result) => `Workflows complete: ${result.successful} successful, ${result.failed} failed`
     );
-    
+
+    // Resolve secrets after workflows complete — workflows may have synced them
+    await setDeploymentCommitStatus(input, {
+      state: "pending",
+      description: `Checking secrets for ${input.environment}`,
+      deploymentId: deployment.id
+    });
+
+    const resolvedSecrets = await resolveRepositoryEnvValues({
+      repositoryId: repository.id,
+      repositoryOwner: input.repositoryOwner,
+      repositoryName: input.repositoryName,
+      envMappings: input.config.env_mappings
+    });
+
+    if (!input.dryRun && resolvedSecrets.unresolved.length > 0) {
+      const missing = resolvedSecrets.unresolved.map((item) => `${item.envKey}:${item.secretName}`).join(", ");
+      throw new Error(`Missing repository secret values for env mappings: ${missing}`);
+    }
+
     console.log(`[Deployment Runner] VM hostname: ${vmHostname} (user: ${assignedUsername})`);
     
     // Check if VM approval is required
@@ -629,6 +628,11 @@ export async function executeDeployment(input: ExecuteDeploymentInput): Promise<
         });
         
         if (approvalStatus.status === "pending") {
+          await setDeploymentCommitStatus(input, {
+            state: "pending",
+            description: `Pending VM approval (issue #${approvalStatus.issueNumber})`,
+            deploymentId: deployment.id
+          });
           throw new VmApprovalPendingError(`VM creation pending approval. Waiting for @${assignedUsername} to approve issue #${approvalStatus.issueNumber}`);
         }
         
@@ -673,6 +677,11 @@ export async function executeDeployment(input: ExecuteDeploymentInput): Promise<
             }
           });
           
+          await setDeploymentCommitStatus(input, {
+            state: "pending",
+            description: `Pending VM approval (issue #${issueNumber})`,
+            deploymentId: deployment.id
+          });
           throw new VmApprovalPendingError(`VM approval required. Created issue #${issueNumber} for @${assignedUsername} to review`);
         }
         
@@ -681,6 +690,13 @@ export async function executeDeployment(input: ExecuteDeploymentInput): Promise<
       },
       "VM approval check complete"
     );
+
+    // Approval passed (or not required) — start building the VM
+    await setDeploymentCommitStatus(input, {
+      state: "pending",
+      description: `Building VM for ${input.environment}`,
+      deploymentId: deployment.id
+    });
 
     const vmResult = await runStep(
       deployment.id,
@@ -758,6 +774,12 @@ export async function executeDeployment(input: ExecuteDeploymentInput): Promise<
       );
     }
 
+    await setDeploymentCommitStatus(input, {
+      state: "pending",
+      description: `Deploying Docker container to ${input.environment}`,
+      deploymentId: deployment.id
+    });
+
     console.log(`[Deployment Runner] Starting docker compose deployment to VM...`);
 
     // Resolve docker-compose content (inline or file reference)
@@ -816,6 +838,12 @@ export async function executeDeployment(input: ExecuteDeploymentInput): Promise<
     }
 
     if (caddyfileContent) {
+      await setDeploymentCommitStatus(input, {
+        state: "pending",
+        description: `Deploying Caddyfile for ${input.environment}`,
+        deploymentId: deployment.id
+      });
+
       await runStep(
         deployment.id,
         "caddy.deploy_config",
