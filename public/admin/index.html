@@ -1338,9 +1338,9 @@
     async function upsertPlan(event) {
       event.preventDefault();
       const name = document.getElementById("plan-name").value;
-      const devPlanId = parseInt(document.getElementById("plan-dev-id").value);
-      const stagePlanId = parseInt(document.getElementById("plan-stage-id").value);
-      const prodPlanId = parseInt(document.getElementById("plan-prod-id").value);
+      const devPlanId = document.getElementById("plan-dev-id").value || undefined;
+      const stagePlanId = document.getElementById("plan-stage-id").value || undefined;
+      const prodPlanId = document.getElementById("plan-prod-id").value || undefined;
 
       try {
         await apiCall("/api/admin/plans/upsert", {
