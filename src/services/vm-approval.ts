@@ -83,7 +83,7 @@ A new virtual machine is requested for this repository.
 /approve
 \`\`\`
 
-**Note:** Only you (@${input.assignedUsername}) can approve this request. The VM will be created automatically once approved.`;
+**Note:** Only you (@${input.assignedUsername}) can approve this request. Bot admins may also override with \`/bot approve admin-override\`. The VM will be created automatically once approved.`;
 
 
   const issueResponse = await fetch(`https://api.github.com/repos/${owner}/${name}/issues`, {
@@ -180,19 +180,32 @@ export async function processApprovalComment(input: {
     return { approved: false, message: 'No pending approval request found for this issue' };
   }
   
-  // Check if comment is /approve command
+  // Check if comment is /approve or /bot approve admin-override
   const command = input.commentBody.trim().toLowerCase();
-  if (command !== '/approve') {
+
+  // Admin override path
+  if (command === '/bot approve admin-override') {
+    const adminUsername = appConfig.ADMIN_GITHUB_USERNAME.trim().toLowerCase();
+    if (!adminUsername || input.commentAuthor.toLowerCase() !== adminUsername) {
+      return {
+        approved: false,
+        message: `Admin override attempted by @${input.commentAuthor} but they are not the configured bot admin`
+      };
+    }
+    // Fall through to approval below with admin flag
+  } else if (command === '/approve') {
+    // Verify the comment author is the assigned user
+    if (input.commentAuthor !== approvalRequest.user.githubUsername) {
+      return { 
+        approved: false, 
+        message: `Only @${approvalRequest.user.githubUsername} can approve this VM request (comment by @${input.commentAuthor})` 
+      };
+    }
+  } else {
     return { approved: false, message: 'Comment is not an approval command' };
   }
-  
-  // Verify the comment author is the assigned user
-  if (input.commentAuthor !== approvalRequest.user.githubUsername) {
-    return { 
-      approved: false, 
-      message: `Only @${approvalRequest.user.githubUsername} can approve this VM request (comment by @${input.commentAuthor})` 
-    };
-  }
+
+  const isAdminOverride = command === '/bot approve admin-override';
   
   // Update approval status
   await prisma.vmApprovalRequest.update({
@@ -204,7 +217,7 @@ export async function processApprovalComment(input: {
     }
   });
   
-  console.log(`[VM Approval] VM ${approvalRequest.vmHostname} approved by ${input.commentAuthor}`);
+  console.log(`[VM Approval] VM ${approvalRequest.vmHostname} approved by ${input.commentAuthor}${isAdminOverride ? ' (admin override)' : ''}`);
   
   // Trigger retry of deployment jobs waiting for this approval
   const updateResult = await prisma.deploymentJob.updateMany({
@@ -240,7 +253,7 @@ export async function processApprovalComment(input: {
       'Content-Type': 'application/json'
     },
     body: JSON.stringify({
-      body: `✅ **VM Approved**\n\nThe VM \`${approvalRequest.vmHostname}\` has been approved by @${input.commentAuthor}. Deployment will resume automatically.`
+      body: `✅ **VM Approved${isAdminOverride ? ' (Admin Override)' : ''}**\n\nThe VM \`${approvalRequest.vmHostname}\` has been approved by @${input.commentAuthor}${isAdminOverride ? ' via admin override' : ''}. Deployment will resume automatically.`
     })
   });
   

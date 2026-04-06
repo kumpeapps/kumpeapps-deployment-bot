@@ -657,6 +657,18 @@
           <div id="authorize-plan-message"></div>
         </form>
       </div>
+
+      <div class="card">
+        <h2>User Plan Authorizations</h2>
+        <div class="form-group" style="display:flex;gap:8px;align-items:flex-end;">
+          <div style="flex:1">
+            <label>GitHub Username</label>
+            <select id="lookup-plans-username"><option value="">-- select user --</option></select>
+          </div>
+          <button class="button" onclick="lookupUserPlans()">Look Up</button>
+        </div>
+        <div id="user-plans-list"></div>
+      </div>
     </div>
 
     <!-- Queue Tab -->
@@ -833,7 +845,7 @@
   <script>
     async function apiCall(path, options = {}) {
       const headers = {
-        "Content-Type": "application/json",
+        ...(options.body !== undefined ? { "Content-Type": "application/json" } : {}),
         ...options.headers
       };
 
@@ -904,6 +916,7 @@
         loadRepositories();
       } else if (tabName === "plans") {
         loadPlans();
+        loadUsersForPlans();
       } else if (tabName === "queue") {
         loadQueueStats();
         loadActiveJobs();
@@ -1386,6 +1399,61 @@
         }, 1500);
       } catch (error) {
         document.getElementById("authorize-plan-message").innerHTML = '<div class="alert error">✗ Failed to authorize plan</div>';
+      }
+    }
+
+    async function loadUsersForPlans() {
+      try {
+        const data = await apiCall("/api/admin/users?limit=100");
+        if (!data || !data.users) return;
+        const sel = document.getElementById("lookup-plans-username");
+        const current = sel.value;
+        sel.innerHTML = '<option value="">-- select user --</option>' +
+          data.users.map(u => `<option value="${u.githubUsername}"${u.githubUsername === current ? ' selected' : ''}>${u.githubUsername}</option>`).join("");
+      } catch (_) {}
+    }
+
+    async function lookupUserPlans() {
+      const username = document.getElementById("lookup-plans-username").value.trim();
+      if (!username) return;
+      const container = document.getElementById("user-plans-list");
+      container.innerHTML = '<div class="spinner"></div> Loading...';
+      try {
+        const data = await apiCall(`/api/admin/users/${encodeURIComponent(username)}/plans`);
+        if (!data) return;
+        if (data.authorizedPlans.length === 0) {
+          container.innerHTML = `<p>No plans authorized for @${username}.</p>`;
+          return;
+        }
+        container.innerHTML = `
+          <div class="table-responsive">
+            <table>
+              <thead><tr><th>Plan</th><th>Actions</th></tr></thead>
+              <tbody>
+                ${data.authorizedPlans.map(plan => `
+                  <tr>
+                    <td>${plan}</td>
+                    <td><button class="button danger" style="padding:6px 12px;font-size:12px;" onclick='revokeUserPlan("${username}", "${plan}")'>Revoke</button></td>
+                  </tr>
+                `).join("")}
+              </tbody>
+            </table>
+          </div>`;
+      } catch (error) {
+        container.innerHTML = '<div class="alert error">Failed to load user plans</div>';
+      }
+    }
+
+    async function revokeUserPlan(githubUsername, planName) {
+      if (!confirm(`Revoke plan "${planName}" from @${githubUsername}?`)) return;
+      try {
+        await apiCall("/api/admin/users/plans/revoke", {
+          method: "POST",
+          body: JSON.stringify({ githubUsername, planName })
+        });
+        await lookupUserPlans();
+      } catch (error) {
+        alert("Failed to revoke plan");
       }
     }
 
