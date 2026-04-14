@@ -217,7 +217,7 @@ describe("updateCommitStatus", () => {
         return makeJsonResponse(200, { total_count: 0, check_runs: [] });
       }
 
-      if (method === "POST" && url.includes("/commits/deadbeef123/check-runs")) {
+      if (method === "POST" && url.includes("/repos/kumpeapps/repo/check-runs")) {
         return makeJsonResponse(201, { id: 789 });
       }
 
@@ -236,7 +236,7 @@ describe("updateCommitStatus", () => {
 
     assert.equal(calls.length, 2);
     const url = String(calls[1].input);
-    assert.ok(url.includes("/repos/kumpeapps/repo/commits/deadbeef123/check-runs"));
+    assert.ok(url.includes("/repos/kumpeapps/repo/check-runs"));
 
     const body = JSON.parse(String(calls[1].init?.body ?? "{}")) as {
       name?: string;
@@ -267,7 +267,7 @@ describe("updateCommitStatus", () => {
         return makeJsonResponse(200, { total_count: 0, check_runs: [] });
       }
 
-      if (method === "POST" && url.includes("/commits/abc123/check-runs")) {
+      if (method === "POST" && url.includes("/repos/kumpeapps/repo/check-runs")) {
         return makeJsonResponse(201, { id: 456 });
       }
 
@@ -302,7 +302,7 @@ describe("updateCommitStatus", () => {
         return makeJsonResponse(200, { total_count: 0, check_runs: [] });
       }
 
-      if (method === "POST" && url.includes("/commits/abc123/check-runs")) {
+      if (method === "POST" && url.includes("/repos/kumpeapps/repo/check-runs")) {
         return makeJsonResponse(201, { id: 999 });
       }
 

@@ -450,9 +450,10 @@ export async function updateCommitStatus(input: {
   const description = input.description?.slice(0, 140);
 
   // Prefer Check Runs so GitHub can display real in-progress state.
-  const checkRunPath = `/repos/${encodeURIComponent(input.repositoryOwner)}/${encodeURIComponent(input.repositoryName)}/commits/${input.commitSha}/check-runs`;
+  const checkRunListPath = `/repos/${encodeURIComponent(input.repositoryOwner)}/${encodeURIComponent(input.repositoryName)}/commits/${input.commitSha}/check-runs`;
+  const checkRunCreatePath = `/repos/${encodeURIComponent(input.repositoryOwner)}/${encodeURIComponent(input.repositoryName)}/check-runs`;
   const existingRuns = await githubGet<GithubCheckRunsResponse>(
-    checkRunPath,
+    checkRunListPath,
     input.repositoryOwner,
     input.repositoryName
   );
@@ -482,7 +483,7 @@ export async function updateCommitStatus(input: {
           return;
         }
       } else {
-        const created = await githubPost(checkRunPath, {
+        const created = await githubPost(checkRunCreatePath, {
           name: input.context,
           head_sha: input.commitSha,
           status,
@@ -519,7 +520,7 @@ export async function updateCommitStatus(input: {
           return;
         }
       } else {
-        const created = await githubPost(checkRunPath, {
+        const created = await githubPost(checkRunCreatePath, {
           name: input.context,
           head_sha: input.commitSha,
           status: "completed",
