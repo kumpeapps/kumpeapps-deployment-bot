@@ -2,6 +2,12 @@ import { z } from "zod";
 
 const DeployEnvironmentSchema = z.enum(["dev", "stage", "prod"]);
 
+const RegistryAuthSchema = z.object({
+  registry: z.string().min(1),
+  username_env: z.string().min(1),
+  password_env: z.string().min(1)
+});
+
 export const DeployRulesSchema = z.object({
   environment: DeployEnvironmentSchema,
   branches: z.object({
@@ -23,6 +29,7 @@ export const DeploymentConfigSchema = z.object({
   domains: z.array(z.string().min(1).max(255)).min(1),
   docker_compose: z.string().min(1),
   env_mappings: z.record(z.string().min(1), z.string().min(1)),
+  registry_auth: z.array(RegistryAuthSchema).optional(),
   deploy_rules: z.array(DeployRulesSchema).min(1),
   ssh_port: z.number().int().positive().optional(), // Optional SSH port override for VM
   caddy_ssh_port: z.number().int().positive().optional(), // Optional SSH port override for Caddy server

@@ -144,6 +144,31 @@ describe("DeploymentConfigSchema", () => {
     };
     assert.ok(!DeploymentConfigSchema.safeParse(raw).success);
   });
+
+  it("parses optional registry_auth config", () => {
+    const raw = {
+      deployment_type: "docker",
+      assigned_username: "alice",
+      vm_hostname: "vm.example.com",
+      domains: ["app.example.com"],
+      docker_compose: "version: '3'",
+      env_mappings: {
+        GHCR_USERNAME: "GHCR_USERNAME",
+        GHCR_TOKEN: "GHCR_TOKEN"
+      },
+      registry_auth: [
+        {
+          registry: "ghcr.io",
+          username_env: "GHCR_USERNAME",
+          password_env: "GHCR_TOKEN"
+        }
+      ],
+      deploy_rules: [{ environment: "dev", branches: { include: [], exclude: [] } }]
+    };
+
+    const result = DeploymentConfigSchema.safeParse(raw);
+    assert.ok(result.success, JSON.stringify(result));
+  });
 });
 
 describe("validateDeploymentPolicy", () => {
