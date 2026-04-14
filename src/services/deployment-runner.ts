@@ -44,6 +44,12 @@ export type ExecuteDeploymentInput = {
   dryRunOnlyGuard: boolean;
 };
 
+type ResolvedRegistryAuth = {
+  registry: string;
+  username: string;
+  password: string;
+};
+
 async function createStep(deploymentId: number, stepName: string): Promise<number> {
   const step = await prisma.deploymentStep.create({
     data: {
@@ -784,6 +790,26 @@ export async function executeDeployment(input: ExecuteDeploymentInput): Promise<
       deploymentId: deployment.id
     });
 
+    const registryLogins: ResolvedRegistryAuth[] = [];
+    for (const auth of input.config.registry_auth ?? []) {
+      const username = resolvedSecrets.envValues[auth.username_env];
+      const password = resolvedSecrets.envValues[auth.password_env];
+
+      if (!input.dryRun && (!username || !password)) {
+        throw new Error(
+          `Missing registry_auth credentials for ${auth.registry}: expected env values ${auth.username_env} and ${auth.password_env}`
+        );
+      }
+
+      if (username && password) {
+        registryLogins.push({
+          registry: auth.registry,
+          username,
+          password
+        });
+      }
+    }
+
     console.log(`[Deployment Runner] Starting docker compose deployment to VM...`);
 
     // Resolve docker-compose content (inline or file reference)
@@ -807,6 +833,7 @@ export async function executeDeployment(input: ExecuteDeploymentInput): Promise<
           vmIp: vmIp!,
           composeConfig: dockerComposeContent,
           envValues: resolvedSecrets.envValues,
+          registryLogins,
           dryRun: input.dryRun,
           sshUser: appConfig.VM_SSH_USER,
           sshKeyPath: appConfig.VM_SSH_KEY_PATH,

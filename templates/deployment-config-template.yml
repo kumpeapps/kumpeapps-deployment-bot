@@ -99,6 +99,20 @@ env_mappings: {}
   # DATABASE_URL: DB_CONNECTION_STRING
   # API_KEY: API_SECRET_KEY
 
+# Optional: Docker/registry authentication for private images
+# Each entry points to environment variables from env_mappings.
+# These credentials are written to a VM-local Docker config and used for
+# docker compose pull/up during deployment.
+# registry_auth:
+#   # GHCR example
+#   - registry: ghcr.io
+#     username_env: GHCR_USERNAME
+#     password_env: GHCR_TOKEN
+#   # Docker Hub example
+#   - registry: https://index.docker.io/v1/
+#     username_env: DOCKERHUB_USERNAME
+#     password_env: DOCKERHUB_TOKEN
+
 # Deployment rules: when to deploy based on git branches
 # Note: This config file's environment is determined by its folder location:
 #   .kumpeapps-deploy-bot/dev/    → dev environment

@@ -11,6 +11,11 @@ export type VmDeployInput = {
   vmIp: string;
   composeConfig: string;
   envValues: Record<string, string>;
+  registryLogins?: Array<{
+    registry: string;
+    username: string;
+    password: string;
+  }>;
   dryRun: boolean;
   sshUser: string;
   sshKeyPath: string;
@@ -62,6 +67,23 @@ function envFileContent(envValues: Record<string, string>): string {
   return Object.entries(envValues)
     .map(([key, value]) => `${key}=${JSON.stringify(value)}`)
     .join("\n");
+}
+
+function dockerConfigContent(registryLogins: Array<{ registry: string; username: string; password: string }>): string {
+  const auths: Record<string, { auth: string }> = {};
+
+  for (const login of registryLogins) {
+    const key = login.registry.trim();
+    if (!key) {
+      continue;
+    }
+
+    auths[key] = {
+      auth: Buffer.from(`${login.username}:${login.password}`, "utf8").toString("base64")
+    };
+  }
+
+  return JSON.stringify({ auths });
 }
 
 function commonSshArgs(input: { sshKeyPath: string; sshPort: number }): string[] {
@@ -166,10 +188,15 @@ export async function deployComposeToVm(input: VmDeployInput): Promise<string> {
   const composePath = join(workDir, "docker-compose.yml");
   const envPath = join(workDir, ".env");
   const remoteDir = input.remoteBaseDir;
+  const dockerConfigPath = join(workDir, "docker-config.json");
+  const hasRegistryLogins = (input.registryLogins?.length ?? 0) > 0;
 
   try {
     await writeFile(composePath, input.composeConfig, "utf8");
     await writeFile(envPath, envFileContent(input.envValues), "utf8");
+    if (hasRegistryLogins && input.registryLogins) {
+      await writeFile(dockerConfigPath, dockerConfigContent(input.registryLogins), "utf8");
+    }
 
     await runRemoteSsh(
       {
@@ -218,6 +245,31 @@ export async function deployComposeToVm(input: VmDeployInput): Promise<string> {
       `${remoteDir}/.env`
     );
 
+    if (hasRegistryLogins) {
+      await runRemoteSsh(
+        {
+          sshUser: input.sshUser,
+          sshKeyPath: input.sshKeyPath,
+          sshPort: input.sshPort,
+          host: input.vmIp
+        },
+        `mkdir -p ${remoteDir}/.docker`
+      );
+
+      await copyToRemote(
+        {
+          sshUser: input.sshUser,
+          sshKeyPath: input.sshKeyPath,
+          sshPort: input.sshPort,
+          host: input.vmIp
+        },
+        dockerConfigPath,
+        `${remoteDir}/.docker/config.json`
+      );
+    }
+
+    const dockerConfigPrefix = hasRegistryLogins ? `DOCKER_CONFIG=${shellQuote(`${remoteDir}/.docker`)} ` : "";
+
     const { stdout } = await runRemoteSsh(
       {
         sshUser: input.sshUser,
@@ -225,7 +277,7 @@ export async function deployComposeToVm(input: VmDeployInput): Promise<string> {
         sshPort: input.sshPort,
         host: input.vmIp
       },
-      `cd ${remoteDir} && docker compose pull && docker compose up -d`
+      `cd ${remoteDir} && ${dockerConfigPrefix}docker compose pull && ${dockerConfigPrefix}docker compose up -d`
     );
 
     // Enable or restart the systemctl service

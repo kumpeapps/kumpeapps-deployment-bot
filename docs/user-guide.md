@@ -132,6 +132,7 @@ For more details, see [README-ACTION.md](../README-ACTION.md).
 | `docker_compose` | Compose file path or inline content | See below |
 | `caddy` | Caddy config file paths or inline content | See Caddy section |
 | `env_mappings` | Map env vars to GitHub repository secrets | `DATABASE_URL: DB_SECRET_NAME` |
+| `registry_auth` | Optional registry credentials for private images (GHCR/Docker Hub) | See Registry Auth section |
 | `deploy_rules` | Branch/tag rules to trigger deployment | See deploy_rules section |
 
 ### Optional Fields
@@ -176,6 +177,33 @@ docker_compose: |
       environment:
         POSTGRES_PASSWORD: $DB_PASSWORD
 ```
+
+### Registry Auth (Private Images)
+
+If your compose file pulls private images (for example from GHCR or private Docker Hub repos), configure registry credentials using `registry_auth`.
+
+Credentials are sourced from environment variables, so each `username_env` / `password_env` must be present in `env_mappings` and synced as repository secrets.
+
+```yaml
+env_mappings:
+  GHCR_USERNAME: GHCR_USERNAME
+  GHCR_TOKEN: GHCR_TOKEN
+  DOCKERHUB_USERNAME: DOCKERHUB_USERNAME
+  DOCKERHUB_TOKEN: DOCKERHUB_TOKEN
+
+registry_auth:
+  - registry: ghcr.io
+    username_env: GHCR_USERNAME
+    password_env: GHCR_TOKEN
+  - registry: https://index.docker.io/v1/
+    username_env: DOCKERHUB_USERNAME
+    password_env: DOCKERHUB_TOKEN
+```
+
+Notes:
+- Use a PAT/token for `password_env` when your registry requires tokens.
+- For GHCR, use a GitHub username + token pair with package read access.
+- The bot generates a VM-local Docker auth config and uses it for `docker compose pull` and `docker compose up`.
 
 **Automatic Managed Nebula Client Injection**
 
