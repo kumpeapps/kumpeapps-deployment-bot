@@ -204,13 +204,24 @@ describe("updateCommitStatus", () => {
     assert.equal(called, false);
   });
 
-  it("posts commit status when enabled", async () => {
+  it("posts check run when enabled", async () => {
     appConfig.GITHUB_COMMIT_STATUS_ENABLED = true;
 
     const calls: FetchCall[] = [];
     globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
       calls.push({ input, init });
-      return makeJsonResponse(201, { id: 789 });
+      const method = String(init?.method ?? "GET").toUpperCase();
+      const url = String(input);
+
+      if (method === "GET" && url.includes("/commits/deadbeef123/check-runs")) {
+        return makeJsonResponse(200, { total_count: 0, check_runs: [] });
+      }
+
+      if (method === "POST" && url.includes("/commits/deadbeef123/check-runs")) {
+        return makeJsonResponse(201, { id: 789 });
+      }
+
+      return makeJsonResponse(404, { message: "unexpected request" });
     }) as typeof fetch;
 
     await updateCommitStatus({
@@ -223,20 +234,59 @@ describe("updateCommitStatus", () => {
       targetUrl: "https://bot.example.com/api/deployments/42"
     });
 
-    assert.equal(calls.length, 1);
-    const url = String(calls[0].input);
-    assert.ok(url.includes("/repos/kumpeapps/repo/statuses/deadbeef123"));
+    assert.equal(calls.length, 2);
+    const url = String(calls[1].input);
+    assert.ok(url.includes("/repos/kumpeapps/repo/commits/deadbeef123/check-runs"));
 
-    const body = JSON.parse(String(calls[0].init?.body ?? "{}")) as {
-      state?: string;
-      context?: string;
-      description?: string;
-      target_url?: string;
+    const body = JSON.parse(String(calls[1].init?.body ?? "{}")) as {
+      name?: string;
+      status?: string;
+      conclusion?: string;
+      details_url?: string;
+      output?: {
+        summary?: string;
+      };
     };
-    assert.equal(body.state, "success");
-    assert.equal(body.context, "kumpeapps-bot/deployment/prod");
-    assert.equal(body.description, "Deployed successfully to prod");
-    assert.equal(body.target_url, "https://bot.example.com/api/deployments/42");
+    assert.equal(body.name, "kumpeapps-bot/deployment/prod");
+    assert.equal(body.status, "completed");
+    assert.equal(body.conclusion, "success");
+    assert.equal(body.output?.summary, "Deployed successfully to prod");
+    assert.equal(body.details_url, "https://bot.example.com/api/deployments/42");
+  });
+
+  it("supports in_progress status checks", async () => {
+    appConfig.GITHUB_COMMIT_STATUS_ENABLED = true;
+
+    const calls: FetchCall[] = [];
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      calls.push({ input, init });
+      const method = String(init?.method ?? "GET").toUpperCase();
+      const url = String(input);
+
+      if (method === "GET" && url.includes("/commits/abc123/check-runs")) {
+        return makeJsonResponse(200, { total_count: 0, check_runs: [] });
+      }
+
+      if (method === "POST" && url.includes("/commits/abc123/check-runs")) {
+        return makeJsonResponse(201, { id: 456 });
+      }
+
+      return makeJsonResponse(404, { message: "unexpected request" });
+    }) as typeof fetch;
+
+    await updateCommitStatus({
+      repositoryOwner: "kumpeapps",
+      repositoryName: "repo",
+      commitSha: "abc123",
+      state: "in_progress",
+      context: "kumpeapps-bot/deployment/dev",
+      description: "Building VM"
+    });
+
+    const body = JSON.parse(String(calls[1].init?.body ?? "{}")) as {
+      status?: string;
+    };
+    assert.equal(body.status, "in_progress");
   });
 
   it("truncates description to 140 characters", async () => {
@@ -245,7 +295,18 @@ describe("updateCommitStatus", () => {
     const calls: FetchCall[] = [];
     globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
       calls.push({ input, init });
-      return makeJsonResponse(201, {});
+      const method = String(init?.method ?? "GET").toUpperCase();
+      const url = String(input);
+
+      if (method === "GET" && url.includes("/commits/abc123/check-runs")) {
+        return makeJsonResponse(200, { total_count: 0, check_runs: [] });
+      }
+
+      if (method === "POST" && url.includes("/commits/abc123/check-runs")) {
+        return makeJsonResponse(201, { id: 999 });
+      }
+
+      return makeJsonResponse(404, { message: "unexpected request" });
     }) as typeof fetch;
 
     const longDescription = "a".repeat(200);
@@ -258,10 +319,12 @@ describe("updateCommitStatus", () => {
       description: longDescription
     });
 
-    const body = JSON.parse(String(calls[0].init?.body ?? "{}")) as {
-      description?: string;
+    const body = JSON.parse(String(calls[1].init?.body ?? "{}")) as {
+      output?: {
+        summary?: string;
+      };
     };
-    assert.equal(body.description?.length, 140);
+    assert.equal(body.output?.summary?.length, 140);
   });
 });
 

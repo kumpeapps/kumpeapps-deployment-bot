@@ -124,7 +124,7 @@ async function setDeploymentCommitStatus(
     environment: string;
   },
   options: {
-    state: "pending" | "success" | "failure";
+    state: "pending" | "in_progress" | "success" | "failure";
     description: string;
     deploymentId?: number;
     targetUrlOverride?: string;
@@ -508,7 +508,8 @@ export async function executeDeployment(input: ExecuteDeploymentInput): Promise<
     }
   });
 
-  // Create GitHub Deployment and mark in_progress (best-effort)
+  // Create GitHub Deployment (best-effort).
+  // We intentionally delay in_progress until preflight gates pass.
   const githubDeploymentId = await createGithubDeployment({
     repositoryOwner: input.repositoryOwner,
     repositoryName: input.repositoryName,
@@ -517,17 +518,9 @@ export async function executeDeployment(input: ExecuteDeploymentInput): Promise<
   });
 
   if (githubDeploymentId !== null) {
-    const logUrl = deploymentLogUrl(deployment.id);
     await prisma.deployment.update({
       where: { id: deployment.id },
       data: { githubDeploymentId }
-    });
-    await updateGithubDeploymentStatus({
-      repositoryOwner: input.repositoryOwner,
-      repositoryName: input.repositoryName,
-      githubDeploymentId,
-      state: "in_progress",
-      logUrl
     });
   }
 
@@ -691,9 +684,20 @@ export async function executeDeployment(input: ExecuteDeploymentInput): Promise<
       "VM approval check complete"
     );
 
+    // Preflight gates passed (workflow checks + approval), now mark deployment as in progress.
+    if (githubDeploymentId !== null) {
+      await updateGithubDeploymentStatus({
+        repositoryOwner: input.repositoryOwner,
+        repositoryName: input.repositoryName,
+        githubDeploymentId,
+        state: "in_progress",
+        logUrl: deploymentLogUrl(deployment.id)
+      });
+    }
+
     // Approval passed (or not required) — start building the VM
     await setDeploymentCommitStatus(input, {
-      state: "pending",
+      state: "in_progress",
       description: `Building VM for ${input.environment}`,
       deploymentId: deployment.id
     });
@@ -775,7 +779,7 @@ export async function executeDeployment(input: ExecuteDeploymentInput): Promise<
     }
 
     await setDeploymentCommitStatus(input, {
-      state: "pending",
+      state: "in_progress",
       description: `Deploying Docker container to ${input.environment}`,
       deploymentId: deployment.id
     });
@@ -839,7 +843,7 @@ export async function executeDeployment(input: ExecuteDeploymentInput): Promise<
 
     if (caddyfileContent) {
       await setDeploymentCommitStatus(input, {
-        state: "pending",
+        state: "in_progress",
         description: `Deploying Caddyfile for ${input.environment}`,
         deploymentId: deployment.id
       });
