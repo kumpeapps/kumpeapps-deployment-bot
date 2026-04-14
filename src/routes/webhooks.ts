@@ -1482,26 +1482,35 @@ Reply to this issue with a command to get started!`;
     }
   });
 
-  webhooks.on("pull_request.labeled", async ({ payload }: { payload: any }) => {
-    if (!appConfig.AUTO_DEPLOY_ENABLED) {
-      app.log.info("Auto deploy skipped: AUTO_DEPLOY_ENABLED is false");
-      return;
-    }
-
-    const fullName = payload.repository.full_name;
+  const queueLabelBasedPrDeployments = async (input: {
+    payload: any;
+    eventName: string;
+    labelNames: string[];
+    removeLabelsFromOtherPrs: boolean;
+  }): Promise<void> => {
+    const fullName = input.payload.repository.full_name;
     const [owner, name] = fullName.split("/");
-    const prNumber = payload.pull_request.number;
-    const prHeadRef = payload.pull_request.head.ref;
-    const prHeadSha = payload.pull_request.head.sha;
-    const labelName = payload.label.name;
+    const prNumber = input.payload.pull_request.number;
+    const prHeadRef = input.payload.pull_request.head.ref;
+    const prHeadSha = input.payload.pull_request.head.sha;
 
     app.log.info(
-      { fullName, prNumber, labelName, branch: prHeadRef },
-      "Processing pull_request.labeled event"
+      {
+        fullName,
+        prNumber,
+        eventName: input.eventName,
+        labels: input.labelNames,
+        branch: prHeadRef,
+        commitSha: prHeadSha
+      },
+      "Processing PR event for label-based deploy"
     );
 
     if (!owner || !name) {
-      app.log.warn({ fullName }, "Skipping label-based deploy due to malformed repository full name");
+      app.log.warn(
+        { fullName, eventName: input.eventName },
+        "Skipping label-based deploy due to malformed repository full name"
+      );
       return;
     }
 
@@ -1515,7 +1524,10 @@ Reply to this issue with a command to get started!`;
     });
 
     if (!repository) {
-      app.log.info({ fullName }, "Skipping label-based deploy for repository not in control plane");
+      app.log.info(
+        { fullName, eventName: input.eventName },
+        "Skipping label-based deploy for repository not in control plane"
+      );
       return;
     }
 
@@ -1531,18 +1543,27 @@ Reply to this issue with a command to get started!`;
           }),
         onRetry: (error, attempt) => {
           app.log.warn(
-            { error, fullName, attempt },
-            "Config sync failed on PR label; retrying"
+            { error, fullName, eventName: input.eventName, attempt },
+            "Config sync failed on PR event; retrying"
           );
         }
       });
-      
+
       app.log.info(
-        { fullName, synced: syncResult.synced, skipped: syncResult.skipped, errors: syncResult.errors },
-        "Config sync completed on PR label"
+        {
+          fullName,
+          eventName: input.eventName,
+          synced: syncResult.synced,
+          skipped: syncResult.skipped,
+          errors: syncResult.errors
+        },
+        "Config sync completed on PR event"
       );
     } catch (error) {
-      app.log.warn({ error, fullName }, "Config sync failed on PR label; continuing with existing snapshots");
+      app.log.warn(
+        { error, fullName, eventName: input.eventName },
+        "Config sync failed on PR event; continuing with existing snapshots"
+      );
     }
 
     const configSnapshots = await prisma.deploymentConfig.findMany({
@@ -1550,14 +1571,16 @@ Reply to this issue with a command to get started!`;
     });
 
     if (configSnapshots.length === 0) {
-      app.log.info({ fullName }, "No deployment configs found; label-based deploy skipped");
+      app.log.info(
+        { fullName, eventName: input.eventName },
+        "No deployment configs found; label-based deploy skipped"
+      );
       return;
     }
 
     // Get GitHub token for API operations
     const token = await getGitHubToken(owner, name);
 
-    // Track which configs match this label
     let deploymentsQueued = 0;
 
     for (const snapshot of configSnapshots) {
@@ -1568,21 +1591,27 @@ Reply to this issue with a command to get started!`;
       }
 
       const deployLabels = getDeployLabels(configParsed.data, snapshot.environment);
-      if (!deployLabels.includes(labelName)) {
+      const matchingLabel = deployLabels.find((label) => input.labelNames.includes(label));
+      if (!matchingLabel) {
         app.log.info(
-          { configPath: snapshot.configPath, environment: snapshot.environment, labelName },
-          "Label not configured for this deployment config; skipping"
+          {
+            configPath: snapshot.configPath,
+            environment: snapshot.environment,
+            eventName: input.eventName,
+            prLabels: input.labelNames
+          },
+          "PR labels do not match this deployment config; skipping"
         );
         continue;
       }
 
-      // This config matches the label - queue deployment
       app.log.info(
-        { 
-          configPath: snapshot.configPath, 
+        {
+          configPath: snapshot.configPath,
           environment: snapshot.environment,
           prNumber,
-          labelName,
+          labelName: matchingLabel,
+          eventName: input.eventName,
           dryRun: appConfig.AUTO_DEPLOY_DRY_RUN
         },
         "Queueing label-based deploy"
@@ -1595,7 +1624,7 @@ Reply to this issue with a command to get started!`;
           repositoryName: name,
           environment: snapshot.environment as "dev" | "stage" | "prod",
           commitSha: prHeadSha,
-          triggeredBy: payload.sender.login,
+          triggeredBy: input.payload.sender.login,
           caddyHost: appConfig.AUTO_DEPLOY_CADDY_HOST,
           configPath: snapshot.configPath,
           config: configParsed.data,
@@ -1611,7 +1640,11 @@ Reply to this issue with a command to get started!`;
 
       deploymentsQueued++;
 
-      // Remove this label from all other open PRs
+      if (!input.removeLabelsFromOtherPrs) {
+        continue;
+      }
+
+      // Remove matched label from all other open PRs.
       try {
         const prsResponse = await fetch(
           `https://api.github.com/repos/${owner}/${name}/pulls?state=open`,
@@ -1625,23 +1658,21 @@ Reply to this issue with a command to get started!`;
 
         if (prsResponse.ok) {
           const prs = await prsResponse.json() as Array<{ number: number; labels: Array<{ name: string }> }>;
-          
+
           for (const pr of prs) {
-            // Skip the current PR
             if (pr.number === prNumber) {
               continue;
             }
 
-            // Check if this PR has the label
-            const hasLabel = pr.labels.some(l => l.name === labelName);
+            const hasLabel = pr.labels.some(l => l.name === matchingLabel);
             if (hasLabel) {
               app.log.info(
-                { prNumber: pr.number, labelName },
+                { prNumber: pr.number, labelName: matchingLabel },
                 "Removing label from other PR"
               );
 
               await fetch(
-                `https://api.github.com/repos/${owner}/${name}/issues/${pr.number}/labels/${encodeURIComponent(labelName)}`,
+                `https://api.github.com/repos/${owner}/${name}/issues/${pr.number}/labels/${encodeURIComponent(matchingLabel)}`,
                 {
                   method: 'DELETE',
                   headers: {
@@ -1655,7 +1686,7 @@ Reply to this issue with a command to get started!`;
         }
       } catch (error) {
         app.log.warn(
-          { error, labelName },
+          { error, labelName: matchingLabel },
           "Failed to remove label from other PRs"
         );
       }
@@ -1663,10 +1694,56 @@ Reply to this issue with a command to get started!`;
 
     if (deploymentsQueued === 0) {
       app.log.info(
-        { fullName, labelName },
-        "Label did not match any deployment config rules"
+        { fullName, eventName: input.eventName, prLabels: input.labelNames },
+        "PR labels did not match any deployment config rules"
       );
     }
+  };
+
+  webhooks.on("pull_request.labeled", async ({ payload }: { payload: any }) => {
+    if (!appConfig.AUTO_DEPLOY_ENABLED) {
+      app.log.info("Auto deploy skipped: AUTO_DEPLOY_ENABLED is false");
+      return;
+    }
+
+    const labelName = payload.label.name;
+
+    await queueLabelBasedPrDeployments({
+      payload,
+      eventName: "pull_request.labeled",
+      labelNames: [labelName],
+      removeLabelsFromOtherPrs: true
+    });
+  });
+
+  webhooks.on("pull_request.synchronize", async ({ payload }: { payload: any }) => {
+    if (!appConfig.AUTO_DEPLOY_ENABLED) {
+      app.log.info("Auto deploy skipped: AUTO_DEPLOY_ENABLED is false");
+      return;
+    }
+
+    const prLabels = (payload.pull_request.labels ?? [])
+      .map((label: { name?: unknown }) => label?.name)
+      .filter((name: unknown): name is string => typeof name === "string" && name.length > 0);
+
+    if (prLabels.length === 0) {
+      app.log.info(
+        {
+          fullName: payload.repository.full_name,
+          prNumber: payload.pull_request.number,
+          eventName: "pull_request.synchronize"
+        },
+        "PR has no labels; skipping label-based deploy on synchronize"
+      );
+      return;
+    }
+
+    await queueLabelBasedPrDeployments({
+      payload,
+      eventName: "pull_request.synchronize",
+      labelNames: prLabels,
+      removeLabelsFromOtherPrs: false
+    });
   });
 
   webhooks.on("release.published", async ({ payload }: { payload: any }) => {

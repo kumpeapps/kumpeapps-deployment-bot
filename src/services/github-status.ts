@@ -35,6 +35,18 @@ type GithubWorkflowRunsResponse = {
   workflow_runs: GithubWorkflowRun[];
 };
 
+type GithubCheckRun = {
+  id: number;
+  name: string;
+  status: string;
+  conclusion: string | null;
+};
+
+type GithubCheckRunsResponse = {
+  total_count: number;
+  check_runs: GithubCheckRun[];
+};
+
 type GithubIssue = {
   id: number;
   number: number;
@@ -407,10 +419,12 @@ export async function updateGithubDeploymentStatus(input: {
 }
 
 /**
- * GitHub Commit Status state (for traditional status checks on commits/PRs)
+ * Deployment status check state shown on commits/PRs.
+ * Supports in_progress through Check Runs.
  */
-type GithubCommitStatusState =
+type GithubStatusCheckState =
   | "pending"
+  | "in_progress"
   | "success"
   | "failure"
   | "error";
@@ -424,7 +438,7 @@ export async function updateCommitStatus(input: {
   repositoryOwner: string;
   repositoryName: string;
   commitSha: string;
-  state: GithubCommitStatusState;
+  state: GithubStatusCheckState;
   context: string;
   description?: string;
   targetUrl?: string;
@@ -433,12 +447,107 @@ export async function updateCommitStatus(input: {
     return;
   }
 
+  const description = input.description?.slice(0, 140);
+
+  // Prefer Check Runs so GitHub can display real in-progress state.
+  const checkRunPath = `/repos/${encodeURIComponent(input.repositoryOwner)}/${encodeURIComponent(input.repositoryName)}/commits/${input.commitSha}/check-runs`;
+  const existingRuns = await githubGet<GithubCheckRunsResponse>(
+    checkRunPath,
+    input.repositoryOwner,
+    input.repositoryName
+  );
+
+  if (existingRuns) {
+    const matchingRuns = existingRuns.check_runs
+      .filter((run) => run.name === input.context)
+      .sort((a, b) => b.id - a.id);
+    const existingRun = matchingRuns[0];
+
+    if (input.state === "pending" || input.state === "in_progress") {
+      const status = input.state === "in_progress" ? "in_progress" : "queued";
+
+      if (existingRun) {
+        const updatePath = `/repos/${encodeURIComponent(input.repositoryOwner)}/${encodeURIComponent(input.repositoryName)}/check-runs/${existingRun.id}`;
+        const updated = await githubPatch(updatePath, {
+          name: input.context,
+          status,
+          details_url: input.targetUrl,
+          output: {
+            title: input.context,
+            summary: description ?? `Deployment ${input.state.replace("_", " ")}`
+          }
+        }, input.repositoryOwner, input.repositoryName);
+
+        if (updated) {
+          return;
+        }
+      } else {
+        const created = await githubPost(checkRunPath, {
+          name: input.context,
+          head_sha: input.commitSha,
+          status,
+          details_url: input.targetUrl,
+          output: {
+            title: input.context,
+            summary: description ?? `Deployment ${input.state.replace("_", " ")}`
+          }
+        }, input.repositoryOwner, input.repositoryName);
+
+        if (created) {
+          return;
+        }
+      }
+    } else {
+      const conclusion = input.state === "success" ? "success" : "failure";
+      const now = new Date().toISOString();
+
+      if (existingRun) {
+        const updatePath = `/repos/${encodeURIComponent(input.repositoryOwner)}/${encodeURIComponent(input.repositoryName)}/check-runs/${existingRun.id}`;
+        const updated = await githubPatch(updatePath, {
+          name: input.context,
+          status: "completed",
+          conclusion,
+          completed_at: now,
+          details_url: input.targetUrl,
+          output: {
+            title: input.context,
+            summary: description ?? "Deployment completed"
+          }
+        }, input.repositoryOwner, input.repositoryName);
+
+        if (updated) {
+          return;
+        }
+      } else {
+        const created = await githubPost(checkRunPath, {
+          name: input.context,
+          head_sha: input.commitSha,
+          status: "completed",
+          conclusion,
+          completed_at: now,
+          details_url: input.targetUrl,
+          output: {
+            title: input.context,
+            summary: description ?? "Deployment completed"
+          }
+        }, input.repositoryOwner, input.repositoryName);
+
+        if (created) {
+          return;
+        }
+      }
+    }
+  }
+
+  // Fallback to traditional commit statuses if Check Runs are unavailable.
+  const fallbackState = input.state === "in_progress" ? "pending" : input.state;
+
   const path = `/repos/${encodeURIComponent(input.repositoryOwner)}/${encodeURIComponent(input.repositoryName)}/statuses/${input.commitSha}`;
 
   await githubPost(path, {
-    state: input.state,
+    state: fallbackState,
     context: input.context,
-    description: input.description?.slice(0, 140), // GitHub limit is 140 chars
+    description, // GitHub limit is 140 chars
     target_url: input.targetUrl
   }, input.repositoryOwner, input.repositoryName);
 }
