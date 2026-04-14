@@ -467,7 +467,7 @@ export async function updateCommitStatus(input: {
     if (input.state === "pending" || input.state === "in_progress") {
       const status = input.state === "in_progress" ? "in_progress" : "queued";
 
-      if (existingRun) {
+      if (existingRun && existingRun.status !== "completed") {
         const updatePath = `/repos/${encodeURIComponent(input.repositoryOwner)}/${encodeURIComponent(input.repositoryName)}/check-runs/${existingRun.id}`;
         const updated = await githubPatch(updatePath, {
           name: input.context,
@@ -482,27 +482,27 @@ export async function updateCommitStatus(input: {
         if (updated) {
           return;
         }
-      } else {
-        const created = await githubPost(checkRunCreatePath, {
-          name: input.context,
-          head_sha: input.commitSha,
-          status,
-          details_url: input.targetUrl,
-          output: {
-            title: input.context,
-            summary: description ?? `Deployment ${input.state.replace("_", " ")}`
-          }
-        }, input.repositoryOwner, input.repositoryName);
+      }
 
-        if (created) {
-          return;
+      const created = await githubPost(checkRunCreatePath, {
+        name: input.context,
+        head_sha: input.commitSha,
+        status,
+        details_url: input.targetUrl,
+        output: {
+          title: input.context,
+          summary: description ?? `Deployment ${input.state.replace("_", " ")}`
         }
+      }, input.repositoryOwner, input.repositoryName);
+
+      if (created) {
+        return;
       }
     } else {
       const conclusion = input.state === "success" ? "success" : "failure";
       const now = new Date().toISOString();
 
-      if (existingRun) {
+      if (existingRun && existingRun.status !== "completed") {
         const updatePath = `/repos/${encodeURIComponent(input.repositoryOwner)}/${encodeURIComponent(input.repositoryName)}/check-runs/${existingRun.id}`;
         const updated = await githubPatch(updatePath, {
           name: input.context,
@@ -519,23 +519,23 @@ export async function updateCommitStatus(input: {
         if (updated) {
           return;
         }
-      } else {
-        const created = await githubPost(checkRunCreatePath, {
-          name: input.context,
-          head_sha: input.commitSha,
-          status: "completed",
-          conclusion,
-          completed_at: now,
-          details_url: input.targetUrl,
-          output: {
-            title: input.context,
-            summary: description ?? "Deployment completed"
-          }
-        }, input.repositoryOwner, input.repositoryName);
+      }
 
-        if (created) {
-          return;
+      const created = await githubPost(checkRunCreatePath, {
+        name: input.context,
+        head_sha: input.commitSha,
+        status: "completed",
+        conclusion,
+        completed_at: now,
+        details_url: input.targetUrl,
+        output: {
+          title: input.context,
+          summary: description ?? "Deployment completed"
         }
+      }, input.repositoryOwner, input.repositoryName);
+
+      if (created) {
+        return;
       }
     }
   }
@@ -635,14 +635,17 @@ export async function waitForWorkflowsToComplete(input: {
       throw new Error("Failed to fetch workflow runs from GitHub API");
     }
 
-    const totalRuns = data.total_count;
+    // Ignore deployment bot checks to avoid waiting on our own status updates.
+    const checkRuns = data.check_runs.filter(
+      (run) => !run.name.startsWith("kumpeapps-bot/deployment/")
+    );
+    const totalRuns = checkRuns.length;
 
     if (totalRuns === 0) {
       console.log(`[GitHub Workflows] No workflows found for commit ${input.commitSha.slice(0, 7)}, proceeding`);
       return { totalRuns: 0, successful: 0, failed: 0 };
     }
 
-    const checkRuns = data.check_runs;
     const inProgress = checkRuns.filter(run => run.status !== "completed");
     const completed = checkRuns.filter(run => run.status === "completed");
     const successful = completed.filter(run => run.conclusion === "success" || run.conclusion === "skipped");

@@ -7,7 +7,8 @@ import {
   githubApiHealthStats,
   githubApiPrometheusMetrics,
   updateGithubDeploymentStatus,
-  updateCommitStatus
+  updateCommitStatus,
+  waitForWorkflowsToComplete
 } from "./github-status.js";
 
 type FetchCall = {
@@ -289,6 +290,51 @@ describe("updateCommitStatus", () => {
     assert.equal(body.status, "in_progress");
   });
 
+  it("creates a new check run when latest matching run is completed", async () => {
+    appConfig.GITHUB_COMMIT_STATUS_ENABLED = true;
+
+    const calls: FetchCall[] = [];
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      calls.push({ input, init });
+      const method = String(init?.method ?? "GET").toUpperCase();
+      const url = String(input);
+
+      if (method === "GET" && url.includes("/commits/abc123/check-runs")) {
+        return makeJsonResponse(200, {
+          total_count: 1,
+          check_runs: [
+            {
+              id: 321,
+              name: "kumpeapps-bot/deployment/dev",
+              status: "completed",
+              conclusion: "failure"
+            }
+          ]
+        });
+      }
+
+      if (method === "POST" && url.includes("/repos/kumpeapps/repo/check-runs")) {
+        return makeJsonResponse(201, { id: 654 });
+      }
+
+      return makeJsonResponse(404, { message: "unexpected request" });
+    }) as typeof fetch;
+
+    await updateCommitStatus({
+      repositoryOwner: "kumpeapps",
+      repositoryName: "repo",
+      commitSha: "abc123",
+      state: "pending",
+      context: "kumpeapps-bot/deployment/dev",
+      description: "Deploying to dev"
+    });
+
+    assert.equal(calls.length, 2);
+    const method = String(calls[1].init?.method ?? "GET").toUpperCase();
+    assert.equal(method, "POST");
+    assert.ok(String(calls[1].input).includes("/repos/kumpeapps/repo/check-runs"));
+  });
+
   it("truncates description to 140 characters", async () => {
     appConfig.GITHUB_COMMIT_STATUS_ENABLED = true;
 
@@ -325,6 +371,72 @@ describe("updateCommitStatus", () => {
       };
     };
     assert.equal(body.output?.summary?.length, 140);
+  });
+});
+
+describe("waitForWorkflowsToComplete", () => {
+  it("ignores deployment bot self-checks", async () => {
+    appConfig.GITHUB_WORKFLOW_CHECK_ENABLED = true;
+    appConfig.GITHUB_WORKFLOW_CHECK_TIMEOUT_MS = 1_000;
+    appConfig.GITHUB_WORKFLOW_CHECK_POLL_INTERVAL_MS = 1;
+
+    globalThis.fetch = (async () =>
+      makeJsonResponse(200, {
+        total_count: 1,
+        check_runs: [
+          {
+            id: 1,
+            name: "kumpeapps-bot/deployment/dev",
+            status: "in_progress",
+            conclusion: null
+          }
+        ]
+      })) as typeof fetch;
+
+    const result = await waitForWorkflowsToComplete({
+      repositoryOwner: "kumpeapps",
+      repositoryName: "repo",
+      commitSha: "abc123"
+    });
+
+    assert.equal(result.totalRuns, 0);
+    assert.equal(result.successful, 0);
+    assert.equal(result.failed, 0);
+  });
+
+  it("waits only on external checks and ignores self-checks", async () => {
+    appConfig.GITHUB_WORKFLOW_CHECK_ENABLED = true;
+    appConfig.GITHUB_WORKFLOW_CHECK_TIMEOUT_MS = 1_000;
+    appConfig.GITHUB_WORKFLOW_CHECK_POLL_INTERVAL_MS = 1;
+
+    globalThis.fetch = (async () =>
+      makeJsonResponse(200, {
+        total_count: 2,
+        check_runs: [
+          {
+            id: 10,
+            name: "Publish backend image",
+            status: "completed",
+            conclusion: "success"
+          },
+          {
+            id: 11,
+            name: "kumpeapps-bot/deployment/dev",
+            status: "in_progress",
+            conclusion: null
+          }
+        ]
+      })) as typeof fetch;
+
+    const result = await waitForWorkflowsToComplete({
+      repositoryOwner: "kumpeapps",
+      repositoryName: "repo",
+      commitSha: "def456"
+    });
+
+    assert.equal(result.totalRuns, 1);
+    assert.equal(result.successful, 1);
+    assert.equal(result.failed, 0);
   });
 });
 
