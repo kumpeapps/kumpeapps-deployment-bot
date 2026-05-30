@@ -74,7 +74,7 @@ const EnvSchema = z.object({
   DEPLOY_EXECUTION_DRY_RUN_ONLY: envBoolean().default(true),
   DEPLOY_QUEUE_CONCURRENCY: z.coerce.number().int().positive().max(20).default(1),
   DEPLOY_QUEUE_POLL_INTERVAL_MS: z.coerce.number().int().positive().default(1000),
-  DEPLOY_QUEUE_RUNNING_LEASE_MS: z.coerce.number().int().positive().default(900000),
+  DEPLOY_QUEUE_RUNNING_LEASE_MS: z.coerce.number().int().positive().default(2100000),
   DEPLOY_QUEUE_JOB_TIMEOUT_MS: z.coerce.number().int().positive().default(1800000),
   DEPLOY_QUEUE_JOB_RETENTION_DAYS: z.coerce.number().int().positive().default(30),
   DEPLOY_QUEUE_ALERT_QUEUE_DEPTH_HIGH: z.coerce.number().int().nonnegative().default(20),
@@ -137,7 +137,7 @@ const EnvSchema = z.object({
   VIRTUALIZOR_VM_READY_TIMEOUT_MS: z.coerce.number().int().positive().default(600000), // 10 minutes for OS installation
   VIRTUALIZOR_WEBHOOK_SECRET: z.string().default(""), // Secret for authenticating Virtualizor webhook calls
   GITHUB_WORKFLOW_CHECK_ENABLED: envBoolean().default(true),
-  GITHUB_WORKFLOW_CHECK_TIMEOUT_MS: z.coerce.number().int().positive().default(1800000), // 30 minutes
+  GITHUB_WORKFLOW_CHECK_TIMEOUT_MS: z.coerce.number().int().positive().default(9000000), // 2.5 hours
   GITHUB_WORKFLOW_CHECK_POLL_INTERVAL_MS: z.coerce.number().int().positive().default(10000), // 10 seconds
   GITHUB_DEPLOYMENTS_ENABLED: envBoolean().default(false),
   GITHUB_COMMIT_STATUS_ENABLED: envBoolean().default(true),

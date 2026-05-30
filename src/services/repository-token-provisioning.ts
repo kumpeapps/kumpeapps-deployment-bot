@@ -40,6 +40,7 @@ export async function runTokenProvisioningJob(options?: {
   try {
     log?.info({}, "Starting repository token provisioning job");
 
+
     // Get all active repositories
     const repositories = await prisma.repository.findMany({
       where: { active: true },
@@ -131,6 +132,9 @@ export async function runTokenProvisioningJob(options?: {
       skipped,
       errors
     };
+  } catch (error) {
+    log?.error({ error }, "Token provisioning job encountered a fatal error");
+    return { scanned: 0, provisioned: 0, failed: 0, skipped: 0, errors: [] };
   } finally {
     isRunning = false;
   }
@@ -148,11 +152,15 @@ export function startTokenProvisioningScheduler(
   }
 ): NodeJS.Timeout {
   // Run immediately at startup
-  void runTokenProvisioningJob({ logger });
+  void runTokenProvisioningJob({ logger }).catch((err: unknown) => {
+    logger?.error({ err }, "Token provisioning job failed unexpectedly");
+  });
 
   // Schedule regular runs
   return setInterval(() => {
-    void runTokenProvisioningJob({ logger });
+    void runTokenProvisioningJob({ logger }).catch((err: unknown) => {
+      logger?.error({ err }, "Token provisioning job failed unexpectedly");
+    });
   }, intervalMs);
 }
 

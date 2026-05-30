@@ -12,13 +12,28 @@ import {
 import { compensateComposeOnVm, deployCaddyConfig, deployComposeToVm } from "./ssh-deployer.js";
 import { resolveRepositoryEnvValues } from "./repository-secrets.js";
 import { ensureVirtualizorVm, resolvePlanDetails } from "./virtualizor.js";
-import { createGithubDeployment, updateGithubDeploymentStatus, updateCommitStatus, waitForWorkflowsToComplete, reportDeploymentError, closeDeploymentErrorIssue } from "./github-status.js";
+import { createGithubDeployment, updateGithubDeploymentStatus, updateCommitStatus, checkWorkflowsOnce, reportDeploymentError, closeDeploymentErrorIssue } from "./github-status.js";
 import { recordDeploymentCompensationEvent } from "./deployment-compensation-health.js";
 import { buildVmHostname, checkVmApprovalStatus, createVmApprovalRequest } from "./vm-approval.js";
 import { getGitHubToken } from "./github-app-auth.js";
 import { syncAuthorizedAdminsToVm } from "./vm-user-management.js";
 import { fetchFileFromGitHub } from "./github-automation.js";
 import { getNebulaIpAddress } from "./nebula-provisioning.js";
+
+/**
+ * Thrown when required GitHub Actions workflows are still in progress.
+ * Not a real error — signals the queue to park the job as pending_workflows
+ * and re-check after the configured poll interval.
+ */
+export class WorkflowsPendingError extends Error {
+  constructor(
+    public readonly inProgressNames: string[],
+    public readonly workflowCheckStartedAt: Date
+  ) {
+    super(`Workflows still in progress: ${inProgressNames.join(", ")}`);
+    this.name = "WorkflowsPendingError";
+  }
+}
 
 /**
  * Custom error for VM approval pending state.
@@ -42,6 +57,8 @@ export type ExecuteDeploymentInput = {
   config: DeploymentConfig;
   dryRun: boolean;
   dryRunOnlyGuard: boolean;
+  /** Set by the queue on re-runs after pending_workflows; used to enforce overall timeout. */
+  workflowCheckStartedAt?: Date;
 };
 
 type ResolvedRegistryAuth = {
@@ -580,17 +597,42 @@ export async function executeDeployment(input: ExecuteDeploymentInput): Promise<
   let vmIp: string | undefined;
 
   try {
-    // Wait for GitHub Actions workflows to complete before deploying
+    // Single-shot workflow check — if still pending the queue re-parks the job
+    // so other work (other deployments, secrets sync) can proceed.
     await runStep(
       deployment.id,
       "github.check_workflows",
       async () => {
-        const result = await waitForWorkflowsToComplete({
+        const requireWorkflows = input.config.workflow_checks?.require;
+        const result = await checkWorkflowsOnce({
           repositoryOwner: input.repositoryOwner,
           repositoryName: input.repositoryName,
-          commitSha: input.commitSha
+          commitSha: input.commitSha,
+          requireWorkflows
         });
-        return result;
+
+        if (result.status === "disabled" || result.status === "no_runs") {
+          return { totalRuns: 0, successful: 0, failed: 0 };
+        }
+
+        if (result.status === "failed") {
+          throw new Error(`Workflow checks failed: ${result.failedNames.join(", ")}`);
+        }
+
+        if (result.status === "pending") {
+          const checkStartedAt = input.workflowCheckStartedAt ?? new Date();
+          const elapsedMs = Date.now() - checkStartedAt.getTime();
+          if (elapsedMs >= appConfig.GITHUB_WORKFLOW_CHECK_TIMEOUT_MS) {
+            throw new Error(
+              `Workflow check timed out after ${Math.round(elapsedMs / 60000)} minutes. ` +
+              `Still waiting for: ${result.inProgressNames.join(", ")}`
+            );
+          }
+          throw new WorkflowsPendingError(result.inProgressNames, checkStartedAt);
+        }
+
+        // complete
+        return { totalRuns: result.totalRuns, successful: result.successful, failed: result.failed };
       },
       (result) => `Workflows complete: ${result.successful} successful, ${result.failed} failed`
     );
