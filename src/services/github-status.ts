@@ -607,6 +607,91 @@ async function githubGet<T>(path: string, repositoryOwner: string, repositoryNam
  * Returns when all workflows are complete (success, failure, or skipped).
  * Throws if workflows fail or timeout is reached.
  */
+export type WorkflowCheckResult =
+  | { status: "complete"; totalRuns: number; successful: number; failed: number }
+  | { status: "pending"; totalRuns: number; inProgress: number; inProgressNames: string[] }
+  | { status: "failed"; totalRuns: number; failedNames: string[] }
+  | { status: "disabled" }
+  | { status: "no_runs" };
+
+/**
+ * Performs a **single** check of the GitHub Actions workflow status for a commit.
+ * Returns a result object — callers decide whether to retry later.
+ *
+ * @param requireWorkflows - When provided, only check-runs whose names appear in this list
+ *   are considered. All other runs are ignored. Leave empty/undefined to check all
+ *   non-deployment-bot runs (original behaviour).
+ */
+export async function checkWorkflowsOnce(input: {
+  repositoryOwner: string;
+  repositoryName: string;
+  commitSha: string;
+  requireWorkflows?: string[];
+}): Promise<WorkflowCheckResult> {
+  if (!appConfig.GITHUB_WORKFLOW_CHECK_ENABLED) {
+    return { status: "disabled" };
+  }
+
+  const path = `/repos/${encodeURIComponent(input.repositoryOwner)}/${encodeURIComponent(input.repositoryName)}/commits/${input.commitSha}/check-runs`;
+
+  const data = await githubGet<{
+    total_count: number;
+    check_runs: Array<{ id: number; name: string; status: string; conclusion: string | null }>;
+  }>(path, input.repositoryOwner, input.repositoryName);
+
+  if (!data) {
+    throw new Error("Failed to fetch workflow runs from GitHub API");
+  }
+
+  // Always ignore deployment bot checks to avoid self-referential waits.
+  let checkRuns = data.check_runs.filter(
+    (run) => !run.name.startsWith("kumpeapps-bot/deployment/")
+  );
+
+  // If specific workflows are required, restrict to those names only.
+  if (input.requireWorkflows && input.requireWorkflows.length > 0) {
+    const required = new Set(input.requireWorkflows);
+    checkRuns = checkRuns.filter((run) => required.has(run.name));
+  }
+
+  if (checkRuns.length === 0) {
+    return { status: "no_runs" };
+  }
+
+  const totalRuns = checkRuns.length;
+  const inProgress = checkRuns.filter((run) => run.status !== "completed");
+  const completed = checkRuns.filter((run) => run.status === "completed");
+  const successful = completed.filter(
+    (run) => run.conclusion === "success" || run.conclusion === "skipped"
+  );
+  const failed = completed.filter(
+    (run) => run.conclusion === "failure" || run.conclusion === "cancelled"
+  );
+
+  console.log(
+    `[GitHub Workflows] Status for ${input.commitSha.slice(0, 7)}: ` +
+    `${completed.length}/${totalRuns} complete ` +
+    `(${successful.length} success, ${failed.length} failed, ${inProgress.length} in progress)` +
+    (input.requireWorkflows?.length ? ` [filtered to: ${input.requireWorkflows.join(", ")}]` : "")
+  );
+
+  if (failed.length > 0) {
+    return { status: "failed", totalRuns, failedNames: failed.map((r) => r.name) };
+  }
+
+  if (inProgress.length > 0) {
+    return {
+      status: "pending",
+      totalRuns,
+      inProgress: inProgress.length,
+      inProgressNames: inProgress.map((r) => r.name)
+    };
+  }
+
+  return { status: "complete", totalRuns, successful: successful.length, failed: 0 };
+}
+
+/** @deprecated Use checkWorkflowsOnce instead. Kept for any direct callers. */
 export async function waitForWorkflowsToComplete(input: {
   repositoryOwner: string;
   repositoryName: string;
@@ -617,7 +702,6 @@ export async function waitForWorkflowsToComplete(input: {
     return { totalRuns: 0, successful: 0, failed: 0 };
   }
 
-  const path = `/repos/${encodeURIComponent(input.repositoryOwner)}/${encodeURIComponent(input.repositoryName)}/commits/${input.commitSha}/check-runs`;
   const startTime = Date.now();
   const timeoutMs = appConfig.GITHUB_WORKFLOW_CHECK_TIMEOUT_MS;
   const pollIntervalMs = appConfig.GITHUB_WORKFLOW_CHECK_POLL_INTERVAL_MS;
@@ -625,52 +709,23 @@ export async function waitForWorkflowsToComplete(input: {
   console.log(`[GitHub Workflows] Checking workflows for commit ${input.commitSha.slice(0, 7)}`);
 
   while (Date.now() - startTime < timeoutMs) {
-    const data = await githubGet<{ total_count: number; check_runs: Array<{ id: number; name: string; status: string; conclusion: string | null }> }>(
-      path,
-      input.repositoryOwner,
-      input.repositoryName
-    );
+    const result = await checkWorkflowsOnce(input);
 
-    if (!data) {
-      throw new Error("Failed to fetch workflow runs from GitHub API");
-    }
-
-    // Ignore deployment bot checks to avoid waiting on our own status updates.
-    const checkRuns = data.check_runs.filter(
-      (run) => !run.name.startsWith("kumpeapps-bot/deployment/")
-    );
-    const totalRuns = checkRuns.length;
-
-    if (totalRuns === 0) {
-      console.log(`[GitHub Workflows] No workflows found for commit ${input.commitSha.slice(0, 7)}, proceeding`);
+    if (result.status === "disabled" || result.status === "no_runs") {
       return { totalRuns: 0, successful: 0, failed: 0 };
     }
 
-    const inProgress = checkRuns.filter(run => run.status !== "completed");
-    const completed = checkRuns.filter(run => run.status === "completed");
-    const successful = completed.filter(run => run.conclusion === "success" || run.conclusion === "skipped");
-    const failed = completed.filter(run => run.conclusion === "failure" || run.conclusion === "cancelled");
-
-    console.log(
-      `[GitHub Workflows] Status: ${completed.length}/${totalRuns} complete ` +
-      `(${successful.length} success, ${failed.length} failed, ${inProgress.length} in progress)`
-    );
-
-    if (inProgress.length > 0) {
-      const inProgressNames = inProgress.map(run => run.name).join(", ");
-      console.log(`[GitHub Workflows] Waiting for: ${inProgressNames}`);
+    if (result.status === "failed") {
+      throw new Error(`Workflow checks failed: ${result.failedNames.join(", ")}`);
     }
 
-    if (completed.length === totalRuns) {
-      if (failed.length > 0) {
-        const failedNames = failed.map(run => run.name).join(", ");
-        throw new Error(`Workflow checks failed: ${failedNames}`);
-      }
-
-      console.log(`[GitHub Workflows] All ${totalRuns} workflow(s) completed successfully`);
-      return { totalRuns, successful: successful.length, failed: 0 };
+    if (result.status === "complete") {
+      console.log(`[GitHub Workflows] All ${result.totalRuns} workflow(s) completed successfully`);
+      return { totalRuns: result.totalRuns, successful: result.successful, failed: 0 };
     }
 
+    // pending
+    console.log(`[GitHub Workflows] Waiting for: ${result.inProgressNames.join(", ")}`);
     await sleep(pollIntervalMs);
   }
 

@@ -524,39 +524,46 @@ export async function registerWebhookRoutes(
     // Process collaborator additions asynchronously to avoid blocking webhook response
     // This prevents database connection timeouts when there are many repositories
     setImmediate(async () => {
-      const installationToken = await getInstallationTokenById(BigInt(payload.installation.id));
+      try {
+        const installationToken = await getInstallationTokenById(BigInt(payload.installation.id));
 
-      for (const repo of repositoriesAdded) {
-        try {
-          await addRepositoryCollaborator({
-            repositoryOwner: repo.owner,
-            repositoryName: repo.name,
-            username: "kumpeapps-bot-deploy",
-            permission: "push",
-            token: installationToken ?? undefined
-          });
-          app.log.info(
-            { owner: repo.owner, repo: repo.name },
-            "Added kumpeapps-bot-deploy as collaborator"
-          );
-
-          // Auto-accept the invitation (for personal repos where invitation is pending)
-          const accepted = await acceptRepositoryInvitation({
-            repositoryOwner: repo.owner,
-            repositoryName: repo.name
-          });
-          if (accepted) {
+        for (const repo of repositoriesAdded) {
+          try {
+            await addRepositoryCollaborator({
+              repositoryOwner: repo.owner,
+              repositoryName: repo.name,
+              username: "kumpeapps-bot-deploy",
+              permission: "push",
+              token: installationToken ?? undefined
+            });
             app.log.info(
               { owner: repo.owner, repo: repo.name },
-              "Auto-accepted collaborator invitation for kumpeapps-bot-deploy"
+              "Added kumpeapps-bot-deploy as collaborator"
+            );
+
+            // Auto-accept the invitation (for personal repos where invitation is pending)
+            const accepted = await acceptRepositoryInvitation({
+              repositoryOwner: repo.owner,
+              repositoryName: repo.name
+            });
+            if (accepted) {
+              app.log.info(
+                { owner: repo.owner, repo: repo.name },
+                "Auto-accepted collaborator invitation for kumpeapps-bot-deploy"
+              );
+            }
+          } catch (error) {
+            app.log.warn(
+              { owner: repo.owner, repo: repo.name, error: String(error) },
+              "Failed to add kumpeapps-bot-deploy as collaborator - continuing"
             );
           }
-        } catch (error) {
-          app.log.warn(
-            { owner: repo.owner, repo: repo.name, error: String(error) },
-            "Failed to add kumpeapps-bot-deploy as collaborator - continuing"
-          );
         }
+      } catch (error) {
+        app.log.error(
+          { installationId: payload.installation.id, error },
+          "Critical error in collaborator addition background task"
+        );
       }
     });
   });

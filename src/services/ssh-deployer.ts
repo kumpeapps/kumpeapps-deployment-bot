@@ -280,29 +280,33 @@ export async function deployComposeToVm(input: VmDeployInput): Promise<string> {
       `cd ${remoteDir} && ${dockerConfigPrefix}docker compose pull && ${dockerConfigPrefix}docker compose up -d`
     );
 
-    // Enable or restart the systemctl service
-    const { appConfig } = await import("../config.js");
-    const serviceName = appConfig.DEPLOYMENT_SERVICE_NAME;
-    const systemctlCmd = isNewDeployment
-      ? `sudo systemctl enable ${serviceName} --now`
-      : `sudo systemctl restart ${serviceName}`;
-    
-    console.log(`[SSH Deployer] Running systemctl command: ${systemctlCmd}`);
-    
-    try {
-      const systemctlResult = await runRemoteSsh(
-        {
-          sshUser: input.sshUser,
-          sshKeyPath: input.sshKeyPath,
-          sshPort: input.sshPort,
-          host: input.vmIp
-        },
-        systemctlCmd
-      );
-      console.log(`[SSH Deployer] systemctl command succeeded: ${systemctlResult.stdout || '(no output)'}`);
-    } catch (err) {
-      // Log but don't fail deployment if systemctl command fails
-      console.warn(`[SSH Deployer] systemctl command failed (non-fatal): ${err}`);
+    // For new deployments, enable and start the systemctl service so it is registered for
+    // auto-restart and survives reboots. For existing deployments, `docker compose up -d`
+    // above already updated and restarted the containers; running `systemctl restart` again
+    // would stop those freshly-started containers and bring them back up a second time,
+    // causing an unnecessary second outage window (502 for all requests during deployment).
+    if (isNewDeployment) {
+      const { appConfig } = await import("../config.js");
+      const serviceName = appConfig.DEPLOYMENT_SERVICE_NAME;
+      const enableCmd = `sudo systemctl enable ${serviceName} --now`;
+
+      console.log(`[SSH Deployer] New deployment — enabling systemctl service: ${enableCmd}`);
+
+      try {
+        const systemctlResult = await runRemoteSsh(
+          {
+            sshUser: input.sshUser,
+            sshKeyPath: input.sshKeyPath,
+            sshPort: input.sshPort,
+            host: input.vmIp
+          },
+          enableCmd
+        );
+        console.log(`[SSH Deployer] systemctl enable succeeded: ${systemctlResult.stdout || '(no output)'}`);
+      } catch (err) {
+        // Log but don't fail deployment if systemctl command fails
+        console.warn(`[SSH Deployer] systemctl enable failed (non-fatal): ${err}`);
+      }
     }
 
     return stdout.trim() || "docker compose up completed";

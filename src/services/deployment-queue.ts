@@ -1,7 +1,7 @@
 import type { FastifyBaseLogger } from "fastify";
 import { appConfig } from "../config.js";
 import { prisma } from "../db.js";
-import { executeDeployment, type ExecuteDeploymentInput, VmApprovalPendingError } from "./deployment-runner.js";
+import { executeDeployment, type ExecuteDeploymentInput, VmApprovalPendingError, WorkflowsPendingError } from "./deployment-runner.js";
 
 type DeploymentJobPayload = Omit<ExecuteDeploymentInput, "dryRunOnlyGuard">;
 
@@ -37,13 +37,16 @@ async function requeueExpiredRunningJobs(): Promise<void> {
   });
 }
 
-async function claimNextJob(): Promise<{
+type ClaimedJob = {
   id: number;
   payloadJson: unknown;
   attempts: number;
   maxAttempts: number;
   timeoutMs: number;
-} | null> {
+  workflowCheckStartedAt: Date | null;
+};
+
+async function claimNextJob(): Promise<ClaimedJob | null> {
   const candidate = await prisma.deploymentJob.findFirst({
     where: { status: "queued" },
     orderBy: { createdAt: "asc" },
@@ -79,16 +82,54 @@ async function claimNextJob(): Promise<{
     return null;
   }
 
+  return { ...candidate, workflowCheckStartedAt: null };
+}
+
+async function claimPendingWorkflowsJob(): Promise<ClaimedJob | null> {
+  const now = new Date();
+  const candidate = await prisma.deploymentJob.findFirst({
+    where: {
+      status: "pending_workflows",
+      nextWorkflowCheckAt: { lte: now }
+    },
+    orderBy: { createdAt: "asc" },
+    select: {
+      id: true,
+      payloadJson: true,
+      attempts: true,
+      maxAttempts: true,
+      timeoutMs: true,
+      workflowCheckStartedAt: true
+    }
+  });
+
+  if (!candidate) {
+    return null;
+  }
+
+  console.log(`[Deployment Queue] Found pending_workflows job ${candidate.id}, attempting to re-claim...`);
+
+  const claimed = await prisma.deploymentJob.updateMany({
+    where: {
+      id: candidate.id,
+      status: "pending_workflows"
+    },
+    data: {
+      status: "running",
+      startedAt: new Date(),
+      errorMessage: null,
+      nextWorkflowCheckAt: null
+    }
+  });
+
+  if (claimed.count === 0) {
+    return null;
+  }
+
   return candidate;
 }
 
-async function runClaimedJob(job: {
-  id: number;
-  payloadJson: unknown;
-  attempts: number;
-  maxAttempts: number;
-  timeoutMs: number;
-}): Promise<void> {
+async function runClaimedJob(job: ClaimedJob): Promise<void> {
   console.log(`[Deployment Queue] Executing job ${job.id} (attempt ${job.attempts + 1}/${job.maxAttempts})`);
   const payload = job.payloadJson as DeploymentJobPayload;
   const timeoutMs = job.timeoutMs > 0 ? job.timeoutMs : appConfig.DEPLOY_QUEUE_JOB_TIMEOUT_MS;
@@ -101,6 +142,7 @@ async function runClaimedJob(job: {
 
       void executeDeployment({
         ...payload,
+        workflowCheckStartedAt: job.workflowCheckStartedAt ?? undefined,
         dryRunOnlyGuard: appConfig.DEPLOY_EXECUTION_DRY_RUN_ONLY
       })
         .then((result) => {
@@ -132,17 +174,57 @@ async function runClaimedJob(job: {
     const isTimeoutError = message.includes("timed out after");
     const nextStatus = job.attempts + 1 >= job.maxAttempts ? "failed" : "queued";
 
+    // Workflow check still in progress — re-park the job; queue will re-claim when ready
+    if (error instanceof WorkflowsPendingError) {
+      const nextCheckAt = new Date(Date.now() + appConfig.GITHUB_WORKFLOW_CHECK_POLL_INTERVAL_MS);
+      try {
+        await prisma.deploymentJob.update({
+          where: { id: job.id },
+          data: {
+            status: "pending_workflows",
+            errorMessage: message,
+            startedAt: null,
+            workflowCheckStartedAt: error.workflowCheckStartedAt,
+            nextWorkflowCheckAt: nextCheckAt
+          }
+        });
+      } catch (dbError) {
+        logError(
+          { jobId: job.id, dbError },
+          "Failed to update job to pending_workflows; will be reclaimed by lease timeout"
+        );
+      }
+
+      if (fastifyLogger) {
+        fastifyLogger.info(
+          { jobId: job.id, nextCheckAt, inProgressNames: error.inProgressNames },
+          "Deployment waiting for GitHub workflow checks"
+        );
+      } else {
+        console.log(`[Deployment Queue] Job ${job.id} parked as pending_workflows, next check at ${nextCheckAt.toISOString()}`);
+      }
+
+      return;
+    }
+
     // Special handling for VM approval pending - not a real error
     if (error instanceof VmApprovalPendingError) {
-      await prisma.deploymentJob.update({
-        where: { id: job.id },
-        data: {
-          status: "pending_approval",
-          errorMessage: message,
-          finishedAt: null,
-          startedAt: null
-        }
-      });
+      try {
+        await prisma.deploymentJob.update({
+          where: { id: job.id },
+          data: {
+            status: "pending_approval",
+            errorMessage: message,
+            finishedAt: null,
+            startedAt: null
+          }
+        });
+      } catch (dbError) {
+        logError(
+          { jobId: job.id, dbError },
+          "Failed to update job status to pending_approval; will be reclaimed by lease timeout"
+        );
+      }
 
       if (fastifyLogger) {
         fastifyLogger.info(
@@ -161,16 +243,23 @@ async function runClaimedJob(job: {
     }
 
     // Regular error handling
-    await prisma.deploymentJob.update({
-      where: { id: job.id },
-      data: {
-        status: nextStatus,
-        errorMessage: message,
-        finishedAt: nextStatus === "failed" ? new Date() : null,
-        startedAt: null,
-        timeoutFailuresCount: isTimeoutError ? { increment: 1 } : undefined
-      }
-    });
+    try {
+      await prisma.deploymentJob.update({
+        where: { id: job.id },
+        data: {
+          status: nextStatus,
+          errorMessage: message,
+          finishedAt: nextStatus === "failed" ? new Date() : null,
+          startedAt: null,
+          timeoutFailuresCount: isTimeoutError ? { increment: 1 } : undefined
+        }
+      });
+    } catch (dbError) {
+      logError(
+        { jobId: job.id, nextStatus, dbError },
+        "Failed to update job status after error; will be reclaimed by lease timeout"
+      );
+    }
 
     logError(
       {
@@ -186,16 +275,21 @@ async function runClaimedJob(job: {
 
 async function drainOnce(): Promise<void> {
   while (runningCount < appConfig.DEPLOY_QUEUE_CONCURRENCY) {
-    const claimed = await claimNextJob();
+    // Prefer freshly queued jobs; fall back to pending_workflows jobs whose re-check time has arrived
+    const claimed = (await claimNextJob()) ?? (await claimPendingWorkflowsJob());
     if (!claimed) {
       return;
     }
 
     runningCount += 1;
 
-    void runClaimedJob(claimed).finally(() => {
-      runningCount -= 1;
-    });
+    void runClaimedJob(claimed)
+      .catch((err: unknown) => {
+        logError({ jobId: claimed.id, err }, "Unexpected error escaping runClaimedJob");
+      })
+      .finally(() => {
+        runningCount -= 1;
+      });
   }
 }
 

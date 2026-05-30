@@ -21,6 +21,10 @@ export const DeployRulesSchema = z.object({
   }).optional()
 });
 
+const WorkflowChecksSchema = z.object({
+  require: z.array(z.string().min(1)).optional() // Wait only for these workflow names; absent/empty = wait for all
+});
+
 export const DeploymentConfigSchema = z.object({
   deployment_type: z.literal("docker"),
   assigned_username: z.string().min(1).max(255),
@@ -33,7 +37,8 @@ export const DeploymentConfigSchema = z.object({
   deploy_rules: z.array(DeployRulesSchema).min(1),
   ssh_port: z.number().int().positive().optional(), // Optional SSH port override for VM
   caddy_ssh_port: z.number().int().positive().optional(), // Optional SSH port override for Caddy server
-  authorized_admins: z.array(z.string().min(1)).optional() // Optional list of admin usernames or smart groups (e.g., "github.repo.collaborators")
+  authorized_admins: z.array(z.string().min(1)).optional(), // Optional list of admin usernames or smart groups (e.g., "github.repo.collaborators")
+  workflow_checks: WorkflowChecksSchema.optional() // Control which workflows gate deployment
 });
 
 export type DeploymentConfig = z.infer<typeof DeploymentConfigSchema>;
