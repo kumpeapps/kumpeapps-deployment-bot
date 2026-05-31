@@ -92,6 +92,7 @@ const EnvSchema = z.object({
   VM_DEPLOY_BASE_DIR: z.string().default("/opt/kumpeapps"),
   DEPLOYMENT_SERVICE_NAME: z.string().default("kumpeapps-bot-deployment"),
   SSH_CONNECT_TIMEOUT_SECONDS: z.coerce.number().int().positive().default(15),
+  SSH_DOCKER_COMMAND_TIMEOUT_SECONDS: z.coerce.number().int().positive().default(600),
   SSH_COMMAND_RETRIES: z.coerce.number().int().nonnegative().max(5).default(2),
   SSH_ALERT_FINAL_FAILURES_1H_HIGH: z.coerce.number().int().nonnegative().default(10),
   SSH_ALERT_TIMEOUT_FAILURES_1H_HIGH: z.coerce.number().int().nonnegative().default(3),

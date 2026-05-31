@@ -1062,6 +1062,12 @@ export async function executeDeployment(input: ExecuteDeploymentInput): Promise<
       throw error;
     }
 
+    // Workflows still in progress — re-park the job, do not run compensation or
+    // mark the deployment as failed; the queue will retry when workflows complete.
+    if (error instanceof WorkflowsPendingError) {
+      throw error;
+    }
+
     // Regular error handling for actual failures
     const compensation = await runCompensationPlan({
       deploymentId: deployment.id,

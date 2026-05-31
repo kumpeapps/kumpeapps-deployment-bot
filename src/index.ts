@@ -276,8 +276,28 @@ async function shutdown(signal: NodeJS.Signals): Promise<void> {
   app.log.info({ signal }, "Shutting down");
   stopDeploymentQueueWorker();
   stopWebhookRetryScheduler(app.log);
-  await app.close();
-  await prisma.$disconnect();
+
+  // Close HTTP server with a hard timeout so hung connections don't block the exit.
+  // If app.close() doesn't finish in 10 s we force-exit.
+  const closeTimer = setTimeout(() => {
+    process.stderr.write("[shutdown] Graceful close timed out — forcing exit\n");
+    process.exit(1);
+  }, 10_000);
+  closeTimer.unref(); // Don't let this timer prevent the normal exit path
+
+  try {
+    await app.close();
+  } catch (err) {
+    process.stderr.write(`[shutdown] app.close() error: ${String(err)}\n`);
+  }
+
+  try {
+    await prisma.$disconnect();
+  } catch (err) {
+    process.stderr.write(`[shutdown] prisma.$disconnect() error: ${String(err)}\n`);
+  }
+
+  clearTimeout(closeTimer);
   process.exit(0);
 }
 
@@ -290,11 +310,20 @@ process.on("SIGTERM", () => {
 });
 
 process.on("unhandledRejection", (reason) => {
+  // Use synchronous stderr write first — Pino's async buffer may not flush before process.exit().
+  process.stderr.write(`[unhandledRejection] ${String(reason)}\n`);
+  if (reason instanceof Error && reason.stack) {
+    process.stderr.write(reason.stack + "\n");
+  }
   app.log.error({ reason }, "Unhandled promise rejection");
   void shutdown("SIGTERM");
 });
 
 process.on("uncaughtException", (error) => {
+  process.stderr.write(`[uncaughtException] ${String(error)}\n`);
+  if (error.stack) {
+    process.stderr.write(error.stack + "\n");
+  }
   app.log.fatal({ error }, "Uncaught exception");
   void shutdown("SIGTERM");
 });
