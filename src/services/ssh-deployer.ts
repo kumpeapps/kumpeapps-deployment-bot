@@ -124,17 +124,18 @@ function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'"'"'`)}'`;
 }
 
-async function runCommand(command: string, args: string[]): Promise<{ stdout: string }> {
+async function runCommand(command: string, args: string[], timeoutMs?: number): Promise<{ stdout: string }> {
   let attempt = 0;
   let lastError: unknown;
   const maxAttempts = appConfig.SSH_COMMAND_RETRIES + 1;
+  const resolvedTimeout = timeoutMs ?? appConfig.SSH_CONNECT_TIMEOUT_SECONDS * 1000;
 
   while (attempt < maxAttempts) {
     recordSshCommandAttempt({ isRetry: attempt > 0 });
     try {
       const { stdout } = await execFileAsync(command, args, {
         maxBuffer: 1024 * 1024,
-        timeout: appConfig.SSH_CONNECT_TIMEOUT_SECONDS * 1000
+        timeout: resolvedTimeout
       });
       recordSshCommandSuccess();
       return { stdout };
@@ -171,8 +172,8 @@ async function runCommand(command: string, args: string[]): Promise<{ stdout: st
   throw new Error("Command execution failed");
 }
 
-async function runRemoteSsh(input: RemoteCommandOptions, remoteCommand: string): Promise<{ stdout: string }> {
-  return runCommand("ssh", [...commonSshArgs({ sshKeyPath: input.sshKeyPath, sshPort: input.sshPort }), `${input.sshUser}@${input.host}`, remoteCommand]);
+async function runRemoteSsh(input: RemoteCommandOptions, remoteCommand: string, timeoutMs?: number): Promise<{ stdout: string }> {
+  return runCommand("ssh", [...commonSshArgs({ sshKeyPath: input.sshKeyPath, sshPort: input.sshPort }), `${input.sshUser}@${input.host}`, remoteCommand], timeoutMs);
 }
 
 async function copyToRemote(input: RemoteCommandOptions, localPath: string, remotePath: string): Promise<void> {
@@ -270,21 +271,82 @@ export async function deployComposeToVm(input: VmDeployInput): Promise<string> {
 
     const dockerConfigPrefix = hasRegistryLogins ? `DOCKER_CONFIG=${shellQuote(`${remoteDir}/.docker`)} ` : "";
 
+    // Build a deploy script that runs docker compose pull + restart inside a screen session.
+    // Running inside screen means the docker commands survive SSH disconnects; we then poll
+    // via a separate SSH connection until the screen session finishes.
+    const sessionName = "kumpeapps-deploy";
+    const remoteLogFile = `${remoteDir}/.deploy.log`;
+    const remoteExitFile = `${remoteDir}/.deploy.exit`;
+    const remoteScriptFile = `${remoteDir}/.deploy.sh`;
+    const scriptLocalPath = join(workDir, "deploy.sh");
+
+    const deployScript = [
+      "#!/bin/bash",
+      "set -o pipefail",
+      `cd ${shellQuote(remoteDir)}`,
+      `rm -f ${shellQuote(remoteExitFile)} ${shellQuote(remoteLogFile)}`,
+      `{ ${dockerConfigPrefix}docker compose pull && ${dockerConfigPrefix}docker compose restart; } 2>&1 | tee ${shellQuote(remoteLogFile)}`,
+      `PIPE_EXIT=\${PIPESTATUS[0]}`,
+      `echo $PIPE_EXIT > ${shellQuote(remoteExitFile)}`,
+      `exit $PIPE_EXIT`,
+    ].join("\n");
+
+    await writeFile(scriptLocalPath, deployScript, "utf8");
+
+    // Ensure screen is available on the remote VM
+    await runRemoteSsh(
+      { sshUser: input.sshUser, sshKeyPath: input.sshKeyPath, sshPort: input.sshPort, host: input.vmIp },
+      `which screen 2>/dev/null || apt-get install -y screen 2>/dev/null || yum install -y screen 2>/dev/null || apk add screen 2>/dev/null || { echo "ERROR: screen could not be installed"; exit 1; }`
+    );
+
+    // Upload and prepare the deploy script
+    await copyToRemote(
+      { sshUser: input.sshUser, sshKeyPath: input.sshKeyPath, sshPort: input.sshPort, host: input.vmIp },
+      scriptLocalPath,
+      remoteScriptFile
+    );
+    await runRemoteSsh(
+      { sshUser: input.sshUser, sshKeyPath: input.sshKeyPath, sshPort: input.sshPort, host: input.vmIp },
+      `chmod +x ${shellQuote(remoteScriptFile)}`
+    );
+
+    // Kill any lingering prior session then start a new detached screen session
+    await runRemoteSsh(
+      { sshUser: input.sshUser, sshKeyPath: input.sshKeyPath, sshPort: input.sshPort, host: input.vmIp },
+      `screen -S ${sessionName} -X quit 2>/dev/null; screen -dmS ${sessionName} ${shellQuote(remoteScriptFile)}`
+    );
+
+    // Poll (via a separate SSH connection) until the exit file appears or we time out.
+    // If the polling SSH connection drops, the screen session on the VM continues running.
+    const pollTimeoutSecs = appConfig.SSH_DOCKER_COMMAND_TIMEOUT_SECONDS;
+    const pollScript = [
+      `ELAPSED=0`,
+      `while [ ! -f ${shellQuote(remoteExitFile)} ] && [ "$ELAPSED" -lt ${pollTimeoutSecs} ]; do`,
+      `  sleep 5`,
+      `  ELAPSED=$((ELAPSED + 5))`,
+      `done`,
+      `if [ -f ${shellQuote(remoteExitFile)} ]; then`,
+      `  EXIT_CODE=$(cat ${shellQuote(remoteExitFile)})`,
+      `  cat ${shellQuote(remoteLogFile)} 2>/dev/null || true`,
+      `  rm -f ${shellQuote(remoteScriptFile)} ${shellQuote(remoteLogFile)} ${shellQuote(remoteExitFile)}`,
+      `  exit "$EXIT_CODE"`,
+      `else`,
+      `  printf 'Timed out after %ds — docker compose may still be running in screen session: %s\\n' ${pollTimeoutSecs} ${sessionName}`,
+      `  cat ${shellQuote(remoteLogFile)} 2>/dev/null || true`,
+      `  exit 1`,
+      `fi`,
+    ].join("\n");
+
     const { stdout } = await runRemoteSsh(
-      {
-        sshUser: input.sshUser,
-        sshKeyPath: input.sshKeyPath,
-        sshPort: input.sshPort,
-        host: input.vmIp
-      },
-      `cd ${remoteDir} && ${dockerConfigPrefix}docker compose pull && ${dockerConfigPrefix}docker compose up -d`
+      { sshUser: input.sshUser, sshKeyPath: input.sshKeyPath, sshPort: input.sshPort, host: input.vmIp },
+      pollScript,
+      (appConfig.SSH_DOCKER_COMMAND_TIMEOUT_SECONDS + 30) * 1000
     );
 
     // For new deployments, enable and start the systemctl service so it is registered for
-    // auto-restart and survives reboots. For existing deployments, `docker compose up -d`
-    // above already updated and restarted the containers; running `systemctl restart` again
-    // would stop those freshly-started containers and bring them back up a second time,
-    // causing an unnecessary second outage window (502 for all requests during deployment).
+    // auto-restart and survives reboots. For existing deployments, `docker compose restart`
+    // above has already restarted the containers; running `systemctl restart` again would
+    // cause an unnecessary second outage window.
     if (isNewDeployment) {
       const { appConfig } = await import("../config.js");
       const serviceName = appConfig.DEPLOYMENT_SERVICE_NAME;
@@ -309,7 +371,7 @@ export async function deployComposeToVm(input: VmDeployInput): Promise<string> {
       }
     }
 
-    return stdout.trim() || "docker compose up completed";
+    return stdout.trim() || "docker compose restart completed";
   } finally {
     await rm(workDir, { recursive: true, force: true });
   }
