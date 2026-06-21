@@ -4,16 +4,17 @@ import { appConfig } from "./config.js";
 function databaseUrlWithPoolLimit(databaseUrl: string, connectionLimit: number): string {
   const url = new URL(databaseUrl);
   url.searchParams.set("connection_limit", String(connectionLimit));
-  url.searchParams.set("pool_timeout", "20");
+  url.searchParams.set("pool_timeout", "30");
+  url.searchParams.set("connect_timeout", "10");
   return url.toString();
 }
 
 function defaultConnectionLimitForRole(): number {
   switch (appConfig.BOT_PROCESS_ROLE) {
     case "web":
-      return Math.min(appConfig.DATABASE_CONNECTION_LIMIT, 8);
+      return Math.min(appConfig.DATABASE_CONNECTION_LIMIT, 20);
     case "worker":
-      return Math.min(appConfig.DATABASE_CONNECTION_LIMIT, 8);
+      return Math.min(appConfig.DATABASE_CONNECTION_LIMIT, 12);
     default:
       return appConfig.DATABASE_CONNECTION_LIMIT;
   }

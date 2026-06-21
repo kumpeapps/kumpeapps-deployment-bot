@@ -375,7 +375,14 @@ export async function enqueueDeploymentJob(input: {
   return { jobId: job.id };
 }
 
-export async function deploymentQueueDetailedStats(): Promise<{
+let detailedStatsCache: {
+  expiresAtMs: number;
+  value: Awaited<ReturnType<typeof computeDeploymentQueueDetailedStats>>;
+} | null = null;
+let detailedStatsInflight: Promise<Awaited<ReturnType<typeof computeDeploymentQueueDetailedStats>>> | null = null;
+const DETAILED_STATS_CACHE_MS = 2_000;
+
+async function computeDeploymentQueueDetailedStats(): Promise<{
   current: {
     queued: number;
     running: number;
@@ -644,6 +651,30 @@ export async function deploymentQueueDetailedStats(): Promise<{
       estimatedMinutesToClear
     }
   };
+}
+
+export async function deploymentQueueDetailedStats(): Promise<
+  Awaited<ReturnType<typeof computeDeploymentQueueDetailedStats>>
+> {
+  const now = Date.now();
+  if (detailedStatsCache && detailedStatsCache.expiresAtMs > now) {
+    return detailedStatsCache.value;
+  }
+
+  if (detailedStatsInflight) {
+    return detailedStatsInflight;
+  }
+
+  detailedStatsInflight = computeDeploymentQueueDetailedStats()
+    .then((value) => {
+      detailedStatsCache = { expiresAtMs: Date.now() + DETAILED_STATS_CACHE_MS, value };
+      return value;
+    })
+    .finally(() => {
+      detailedStatsInflight = null;
+    });
+
+  return detailedStatsInflight;
 }
 
 export async function deploymentQueueStats(): Promise<{

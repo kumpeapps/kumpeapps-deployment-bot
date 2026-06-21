@@ -10,8 +10,7 @@ import {
 } from "../services/deployment-compensation-health.js";
 import {
   deploymentQueueDetailedStats,
-  deploymentQueuePrometheusMetrics,
-  deploymentQueueStats
+  deploymentQueuePrometheusMetrics
 } from "../services/deployment-queue.js";
 import { githubApiHealthStats, githubApiPrometheusMetrics } from "../services/github-status.js";
 import { rateLimitHealthStats, rateLimitPrometheusMetrics } from "../services/rate-limit-health.js";
@@ -23,7 +22,6 @@ import { virtualizorHealthStats, virtualizorPrometheusMetrics } from "../service
 
 export async function registerHealthRoutes(app: FastifyInstance): Promise<void> {
   app.get("/health", async () => {
-    const queue = await deploymentQueueStats();
     const queueDetailed = await deploymentQueueDetailedStats();
     const webhookDeliveries = await webhookDeliveryStats();
     const secretEncryption = secretEncryptionHealthStats();
@@ -58,7 +56,7 @@ export async function registerHealthRoutes(app: FastifyInstance): Promise<void> 
         sourceCount: alertSources.length,
         sources: alertSources
       },
-      deploymentQueue: queue,
+      deploymentQueue: queueDetailed.current,
       webhookDeliveries,
       secretEncryption,
       githubApi,
