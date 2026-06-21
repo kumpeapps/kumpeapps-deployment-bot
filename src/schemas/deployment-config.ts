@@ -38,7 +38,8 @@ export const DeploymentConfigSchema = z.object({
   ssh_port: z.number().int().positive().optional(), // Optional SSH port override for VM
   caddy_ssh_port: z.number().int().positive().optional(), // Optional SSH port override for Caddy server
   authorized_admins: z.array(z.string().min(1)).optional(), // Optional list of admin usernames or smart groups (e.g., "github.repo.collaborators")
-  workflow_checks: WorkflowChecksSchema.optional() // Control which workflows gate deployment
+  workflow_checks: WorkflowChecksSchema.optional(), // Control which workflows gate deployment
+  post_deploy_hook: z.string().min(1).optional() // Shell command run on the VM after a successful docker compose up -d
 });
 
 export type DeploymentConfig = z.infer<typeof DeploymentConfigSchema>;

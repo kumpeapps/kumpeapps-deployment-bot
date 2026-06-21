@@ -32,10 +32,13 @@ import {
   isAdminRequestAuthorized,
   refreshAdminRoleBindingsCache
 } from "./services/admin-auth.js";
+import { shouldRunBackgroundWorkers, shouldRunWebServer } from "./services/process-role.js";
 
 const app = Fastify({
   disableRequestLogging: true,
   trustProxy: true, // Trust X-Forwarded-* headers from reverse proxy
+  connectionTimeout: 30_000,
+  keepAliveTimeout: 72_000,
   logger: {
     level: appConfig.LOG_LEVEL,
     transport: appConfig.NODE_ENV === "development" ? { target: "pino-pretty" } : undefined
@@ -123,24 +126,27 @@ app.addHook("onRequest", async (request) => {
 });
 
 app.register(registerHealthRoutes);
-app.register(registerWebhookRoutes, { webhookSecret: appConfig.GITHUB_APP_WEBHOOK_SECRET });
-app.register(registerUserRoutes, { adminToken: appConfig.ADMIN_API_TOKEN });
-app.register(registerRepositorySecretRoutes, { adminToken: appConfig.ADMIN_API_TOKEN });
-app.register(registerRepositoryManagementRoutes, { adminToken: appConfig.ADMIN_API_TOKEN });
-app.register(registerPlanRoutes, { adminToken: appConfig.ADMIN_API_TOKEN });
-app.register(registerRepositoryConfigRoutes, { adminToken: appConfig.ADMIN_API_TOKEN });
-app.register(registerOperationsRoutes, { adminToken: appConfig.ADMIN_API_TOKEN });
-app.register(registerAuditEventRoutes, { adminToken: appConfig.ADMIN_API_TOKEN });
-app.register(registerWebhookDeliveryRoutes, { adminToken: appConfig.ADMIN_API_TOKEN });
-app.register(registerConfigValidationRoutes, { adminToken: appConfig.ADMIN_API_TOKEN });
-app.register(registerDeploymentRoutes, { adminToken: appConfig.ADMIN_API_TOKEN });
-app.register(registerDeploymentQueryRoutes, { adminToken: appConfig.ADMIN_API_TOKEN });
-app.register(registerRbacRoutes, { adminToken: appConfig.ADMIN_API_TOKEN });
-app.register(registerAdminDashboardRoutes);
 
-app.get("/", async (_request, reply) => {
-  return reply.redirect("/admin");
-});
+if (shouldRunWebServer()) {
+  app.register(registerWebhookRoutes, { webhookSecret: appConfig.GITHUB_APP_WEBHOOK_SECRET });
+  app.register(registerUserRoutes, { adminToken: appConfig.ADMIN_API_TOKEN });
+  app.register(registerRepositorySecretRoutes, { adminToken: appConfig.ADMIN_API_TOKEN });
+  app.register(registerRepositoryManagementRoutes, { adminToken: appConfig.ADMIN_API_TOKEN });
+  app.register(registerPlanRoutes, { adminToken: appConfig.ADMIN_API_TOKEN });
+  app.register(registerRepositoryConfigRoutes, { adminToken: appConfig.ADMIN_API_TOKEN });
+  app.register(registerOperationsRoutes, { adminToken: appConfig.ADMIN_API_TOKEN });
+  app.register(registerAuditEventRoutes, { adminToken: appConfig.ADMIN_API_TOKEN });
+  app.register(registerWebhookDeliveryRoutes, { adminToken: appConfig.ADMIN_API_TOKEN });
+  app.register(registerConfigValidationRoutes, { adminToken: appConfig.ADMIN_API_TOKEN });
+  app.register(registerDeploymentRoutes, { adminToken: appConfig.ADMIN_API_TOKEN });
+  app.register(registerDeploymentQueryRoutes, { adminToken: appConfig.ADMIN_API_TOKEN });
+  app.register(registerRbacRoutes, { adminToken: appConfig.ADMIN_API_TOKEN });
+  app.register(registerAdminDashboardRoutes);
+
+  app.get("/", async (_request, reply) => {
+    return reply.redirect("/admin");
+  });
+}
 
 /**
  * Ensure SSH known_hosts file and directory exist with proper permissions
@@ -209,71 +215,93 @@ async function ensureSshKnownHostsFileExists(): Promise<void> {
   }
 }
 
+async function startBackgroundWorkers(): Promise<void> {
+  if (!shouldRunBackgroundWorkers()) {
+    app.log.info({ role: appConfig.BOT_PROCESS_ROLE }, "Background workers disabled for this process role");
+    return;
+  }
+
+  await startDeploymentQueueWorker(app.log);
+
+  try {
+    await pruneExpiredSnoozesRecords();
+  } catch (error) {
+    app.log.warn({ error }, "Failed to prune expired snoozes on startup");
+  }
+
+  try {
+    await pruneOldDeploymentJobs();
+  } catch (error) {
+    app.log.warn({ error }, "Failed to prune old deployment jobs on startup");
+  }
+
+  try {
+    await pruneOldWebhookDeliveries();
+  } catch (error) {
+    app.log.warn({ error }, "Failed to prune old webhook deliveries on startup");
+  }
+
+  if (appConfig.REPOSITORY_TOKEN_PROVISIONING_ENABLED) {
+    app.log.info(
+      { intervalMs: appConfig.REPOSITORY_TOKEN_PROVISIONING_INTERVAL_MS },
+      "Starting repository token provisioning scheduler"
+    );
+    startTokenProvisioningScheduler(
+      appConfig.REPOSITORY_TOKEN_PROVISIONING_INTERVAL_MS,
+      app.log
+    );
+  }
+
+  if (appConfig.WEBHOOK_RETRY_ENABLED) {
+    app.log.info(
+      {
+        intervalMs: appConfig.WEBHOOK_RETRY_INTERVAL_MS,
+        maxAttempts: appConfig.WEBHOOK_RETRY_MAX_ATTEMPTS
+      },
+      "Starting webhook retry scheduler"
+    );
+    startWebhookRetryScheduler(
+      appConfig.WEBHOOK_RETRY_INTERVAL_MS,
+      app.log
+    );
+  }
+}
+
 async function start(): Promise<void> {
   try {
-    // Ensure SSH known_hosts file exists before any SSH operations
-    await ensureSshKnownHostsFileExists();
-    
-    await refreshAdminRoleBindingsCache();
-    await bootstrapAdminRoleBindingsFromEnv(appConfig.ADMIN_API_TOKEN);
-    await startDeploymentQueueWorker(app.log);
-    
-    // Run cleanup of expired snoozes and old jobs on startup
-    try {
-      await pruneExpiredSnoozesRecords();
-    } catch (error) {
-      app.log.warn({ error }, "Failed to prune expired snoozes on startup");
-    }
-    
-    try {
-      await pruneOldDeploymentJobs();
-    } catch (error) {
-      app.log.warn({ error }, "Failed to prune old deployment jobs on startup");
+    app.log.info(
+      {
+        role: appConfig.BOT_PROCESS_ROLE,
+        webServer: shouldRunWebServer(),
+        backgroundWorkers: shouldRunBackgroundWorkers()
+      },
+      "Starting bot process"
+    );
+
+    if (shouldRunBackgroundWorkers()) {
+      await ensureSshKnownHostsFileExists();
     }
 
-    try {
-      await pruneOldWebhookDeliveries();
-    } catch (error) {
-      app.log.warn({ error }, "Failed to prune old webhook deliveries on startup");
+    if (shouldRunWebServer()) {
+      await refreshAdminRoleBindingsCache();
+      await bootstrapAdminRoleBindingsFromEnv(appConfig.ADMIN_API_TOKEN);
     }
 
-    // Start repository token provisioning scheduler
-    if (appConfig.REPOSITORY_TOKEN_PROVISIONING_ENABLED) {
-      app.log.info(
-        { intervalMs: appConfig.REPOSITORY_TOKEN_PROVISIONING_INTERVAL_MS },
-        "Starting repository token provisioning scheduler"
-      );
-      startTokenProvisioningScheduler(
-        appConfig.REPOSITORY_TOKEN_PROVISIONING_INTERVAL_MS,
-        app.log
-      );
-    }
+    await startBackgroundWorkers();
 
-    // Start webhook retry scheduler
-    if (appConfig.WEBHOOK_RETRY_ENABLED) {
-      app.log.info(
-        { 
-          intervalMs: appConfig.WEBHOOK_RETRY_INTERVAL_MS,
-          maxAttempts: appConfig.WEBHOOK_RETRY_MAX_ATTEMPTS
-        },
-        "Starting webhook retry scheduler"
-      );
-      startWebhookRetryScheduler(
-        appConfig.WEBHOOK_RETRY_INTERVAL_MS,
-        app.log
-      );
-    }
-    
     await app.listen({ host: "0.0.0.0", port: appConfig.PORT });
-    app.log.info({ port: appConfig.PORT }, "Bot service listening");
+    app.log.info(
+      { port: appConfig.PORT, role: appConfig.BOT_PROCESS_ROLE },
+      "Bot service listening"
+    );
   } catch (error) {
     app.log.error({ error }, "Failed to start service");
     process.exit(1);
   }
 }
 
-async function shutdown(signal: NodeJS.Signals): Promise<void> {
-  app.log.info({ signal }, "Shutting down");
+async function shutdown(signal: NodeJS.Signals | string, exitCode = 0): Promise<void> {
+  app.log.info({ signal, exitCode }, "Shutting down");
   stopDeploymentQueueWorker();
   stopWebhookRetryScheduler(app.log);
 
@@ -298,7 +326,7 @@ async function shutdown(signal: NodeJS.Signals): Promise<void> {
   }
 
   clearTimeout(closeTimer);
-  process.exit(0);
+  process.exit(exitCode);
 }
 
 process.on("SIGINT", () => {
@@ -310,13 +338,12 @@ process.on("SIGTERM", () => {
 });
 
 process.on("unhandledRejection", (reason) => {
-  // Use synchronous stderr write first — Pino's async buffer may not flush before process.exit().
+  // Log but keep serving — a single async failure must not take down the whole API.
   process.stderr.write(`[unhandledRejection] ${String(reason)}\n`);
   if (reason instanceof Error && reason.stack) {
     process.stderr.write(reason.stack + "\n");
   }
   app.log.error({ reason }, "Unhandled promise rejection");
-  void shutdown("SIGTERM");
 });
 
 process.on("uncaughtException", (error) => {
@@ -325,7 +352,7 @@ process.on("uncaughtException", (error) => {
     process.stderr.write(error.stack + "\n");
   }
   app.log.fatal({ error }, "Uncaught exception");
-  void shutdown("SIGTERM");
+  void shutdown("uncaughtException", 1);
 });
 
 void start();

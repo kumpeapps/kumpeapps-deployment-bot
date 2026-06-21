@@ -9,6 +9,21 @@ let pollTimer: NodeJS.Timeout | null = null;
 let runningCount = 0;
 let fastifyLogger: FastifyBaseLogger | null = null;
 
+// Backoff state for DB connectivity errors (P1001 = unreachable, P2024 = pool exhausted)
+let dbBackoffUntil = 0;
+let consecutiveDbErrors = 0;
+const DB_BACKOFF_MAX_MS = 60_000;
+
+function isDbConnectivityError(error: unknown): boolean {
+  return (
+    error != null &&
+    typeof error === "object" &&
+    "code" in error &&
+    typeof (error as { code: unknown }).code === "string" &&
+    ["P1001", "P2024"].includes((error as { code: string }).code)
+  );
+}
+
 function logError(payload: Record<string, unknown>, message: string): void {
   if (!fastifyLogger) {
     console.error(message, payload);
@@ -16,6 +31,15 @@ function logError(payload: Record<string, unknown>, message: string): void {
   }
 
   fastifyLogger.error(payload, message);
+}
+
+function logWarn(payload: Record<string, unknown>, message: string): void {
+  if (!fastifyLogger) {
+    console.warn(message, payload);
+    return;
+  }
+
+  fastifyLogger.warn(payload, message);
 }
 
 function nowMinusLease(): Date {
@@ -294,11 +318,32 @@ async function drainOnce(): Promise<void> {
 }
 
 async function poll(): Promise<void> {
+  const now = Date.now();
+  if (now < dbBackoffUntil) {
+    return;
+  }
+
   try {
     await requeueExpiredRunningJobs();
     await drainOnce();
+    if (consecutiveDbErrors > 0) {
+      logWarn({ consecutiveDbErrors }, "Deployment queue DB connectivity restored");
+      consecutiveDbErrors = 0;
+      dbBackoffUntil = 0;
+    }
   } catch (error) {
-    logError({ error }, "Deployment queue poll failed");
+    if (isDbConnectivityError(error)) {
+      consecutiveDbErrors += 1;
+      const backoffMs = Math.min(
+        appConfig.DEPLOY_QUEUE_POLL_INTERVAL_MS * Math.pow(2, consecutiveDbErrors),
+        DB_BACKOFF_MAX_MS
+      );
+      dbBackoffUntil = Date.now() + backoffMs;
+      logError({ error, backoffMs, consecutiveDbErrors }, "Deployment queue poll failed (DB unreachable, backing off)");
+    } else {
+      consecutiveDbErrors = 0;
+      logError({ error }, "Deployment queue poll failed");
+    }
   }
 }
 
@@ -323,7 +368,9 @@ export async function enqueueDeploymentJob(input: {
     select: { id: true }
   });
 
-  void poll();
+  void poll().catch((error: unknown) => {
+    logError({ error }, "Deployment queue poll failed after enqueue");
+  });
 
   return { jobId: job.id };
 }
@@ -762,7 +809,9 @@ export async function requeueDeploymentJob(jobId: number): Promise<{
     }
   });
 
-  void poll();
+  void poll().catch((error: unknown) => {
+    logError({ error }, "Deployment queue poll failed after enqueue");
+  });
 
   return {
     jobId,
@@ -780,7 +829,9 @@ export async function startDeploymentQueueWorker(log?: FastifyBaseLogger): Promi
   await poll();
 
   pollTimer = setInterval(() => {
-    void poll();
+    void poll().catch((error: unknown) => {
+      logError({ error }, "Deployment queue scheduled poll failed");
+    });
   }, appConfig.DEPLOY_QUEUE_POLL_INTERVAL_MS);
 }
 
