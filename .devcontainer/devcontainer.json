@@ -11,7 +11,11 @@
 			"enableNonRootDocker": "true",
 			"moby": "true"
 		}
-	}
+	},
+
+	// 1Password SSH agent is forwarded into the container; use ssh-keygen instead of
+	// the Mac-only op-ssh-sign path from the host .gitconfig.
+	"postCreateCommand": "git config --global gpg.ssh.program \"$(which ssh-keygen)\"",
 
 	// Use 'forwardPorts' to make a list of ports inside the container available locally.
 	// "forwardPorts": [],

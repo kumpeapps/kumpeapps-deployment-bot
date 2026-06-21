@@ -618,9 +618,10 @@ export type WorkflowCheckResult =
  * Performs a **single** check of the GitHub Actions workflow status for a commit.
  * Returns a result object — callers decide whether to retry later.
  *
- * @param requireWorkflows - When provided, only check-runs whose names appear in this list
- *   are considered. All other runs are ignored. Leave empty/undefined to check all
- *   non-deployment-bot runs (original behaviour).
+ * @param requireWorkflows - When provided, the workflow runs API is queried and only runs
+ *   whose **workflow name** (the `name:` field in the YAML) appear in this list are considered.
+ *   All other runs are ignored. Leave empty/undefined to check all non-deployment-bot
+ *   check-runs (original behaviour).
  */
 export async function checkWorkflowsOnce(input: {
   repositoryOwner: string;
@@ -630,6 +631,19 @@ export async function checkWorkflowsOnce(input: {
 }): Promise<WorkflowCheckResult> {
   if (!appConfig.GITHUB_WORKFLOW_CHECK_ENABLED) {
     return { status: "disabled" };
+  }
+
+  // When specific workflow names are required, use the workflow runs API so we can
+  // match by workflow name (e.g. "Publish Containers to GHCR") rather than individual
+  // job/check-run names (e.g. "Publish backend image"). This also correctly handles
+  // re-runs by checking only the most recent run for each workflow name.
+  if (input.requireWorkflows && input.requireWorkflows.length > 0) {
+    return checkRequiredWorkflowRuns(
+      input.repositoryOwner,
+      input.repositoryName,
+      input.commitSha,
+      input.requireWorkflows
+    );
   }
 
   const path = `/repos/${encodeURIComponent(input.repositoryOwner)}/${encodeURIComponent(input.repositoryName)}/commits/${input.commitSha}/check-runs`;
@@ -644,15 +658,9 @@ export async function checkWorkflowsOnce(input: {
   }
 
   // Always ignore deployment bot checks to avoid self-referential waits.
-  let checkRuns = data.check_runs.filter(
+  const checkRuns = data.check_runs.filter(
     (run) => !run.name.startsWith("kumpeapps-bot/deployment/")
   );
-
-  // If specific workflows are required, restrict to those names only.
-  if (input.requireWorkflows && input.requireWorkflows.length > 0) {
-    const required = new Set(input.requireWorkflows);
-    checkRuns = checkRuns.filter((run) => required.has(run.name));
-  }
 
   if (checkRuns.length === 0) {
     return { status: "no_runs" };
@@ -671,8 +679,7 @@ export async function checkWorkflowsOnce(input: {
   console.log(
     `[GitHub Workflows] Status for ${input.commitSha.slice(0, 7)}: ` +
     `${completed.length}/${totalRuns} complete ` +
-    `(${successful.length} success, ${failed.length} failed, ${inProgress.length} in progress)` +
-    (input.requireWorkflows?.length ? ` [filtered to: ${input.requireWorkflows.join(", ")}]` : "")
+    `(${successful.length} success, ${failed.length} failed, ${inProgress.length} in progress)`
   );
 
   if (failed.length > 0) {
@@ -689,6 +696,97 @@ export async function checkWorkflowsOnce(input: {
   }
 
   return { status: "complete", totalRuns, successful: successful.length, failed: 0 };
+}
+
+/**
+ * Checks required workflow runs by name using the Actions runs API.
+ * Matches against the workflow `name:` field (e.g. "Publish Containers to GHCR"),
+ * not individual job/check-run names. For re-runs, only the most recent run for
+ * each workflow name is considered.
+ */
+async function checkRequiredWorkflowRuns(
+  repositoryOwner: string,
+  repositoryName: string,
+  commitSha: string,
+  requireWorkflows: string[]
+): Promise<WorkflowCheckResult> {
+  const path = `/repos/${encodeURIComponent(repositoryOwner)}/${encodeURIComponent(repositoryName)}/actions/runs?head_sha=${encodeURIComponent(commitSha)}&per_page=100`;
+
+  const data = await githubGet<{
+    total_count: number;
+    workflow_runs: Array<{
+      id: number;
+      name: string;
+      status: string;
+      conclusion: string | null;
+      created_at: string;
+    }>;
+  }>(path, repositoryOwner, repositoryName);
+
+  if (!data) {
+    throw new Error("Failed to fetch workflow runs from GitHub API");
+  }
+
+  const notStarted: string[] = [];
+  const inProgressNames: string[] = [];
+  const failedNames: string[] = [];
+  let successCount = 0;
+
+  for (const workflowName of requireWorkflows) {
+    // Multiple runs can exist for the same workflow name (original + re-runs).
+    // Only the most recent run matters.
+    const runs = data.workflow_runs
+      .filter((r) => r.name === workflowName)
+      .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+
+    if (runs.length === 0) {
+      notStarted.push(workflowName);
+      continue;
+    }
+
+    const latest = runs[0];
+
+    if (latest.status !== "completed") {
+      inProgressNames.push(workflowName);
+    } else if (latest.conclusion === "success" || latest.conclusion === "skipped") {
+      successCount += 1;
+    } else {
+      // failure, cancelled, timed_out, etc.
+      failedNames.push(workflowName);
+    }
+  }
+
+  console.log(
+    `[GitHub Workflows] Required runs for ${commitSha.slice(0, 7)}: ` +
+    `${successCount} success, ${failedNames.length} failed, ${inProgressNames.length} in progress, ${notStarted.length} not started` +
+    ` [required: ${requireWorkflows.join(", ")}]`
+  );
+
+  if (notStarted.length > 0) {
+    const allPending = [...notStarted, ...inProgressNames];
+    console.log(`[GitHub Workflows] Not yet started: ${notStarted.join(", ")}`);
+    return {
+      status: "pending",
+      totalRuns: data.total_count,
+      inProgress: allPending.length,
+      inProgressNames: allPending
+    };
+  }
+
+  if (failedNames.length > 0) {
+    return { status: "failed", totalRuns: requireWorkflows.length, failedNames };
+  }
+
+  if (inProgressNames.length > 0) {
+    return {
+      status: "pending",
+      totalRuns: requireWorkflows.length,
+      inProgress: inProgressNames.length,
+      inProgressNames
+    };
+  }
+
+  return { status: "complete", totalRuns: requireWorkflows.length, successful: successCount, failed: 0 };
 }
 
 /** @deprecated Use checkWorkflowsOnce instead. Kept for any direct callers. */

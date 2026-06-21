@@ -30,6 +30,8 @@ const envOptionalNumber = () =>
 const EnvSchema = z.object({
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
   DEV: envBoolean().default(false),
+  BOT_PROCESS_ROLE: z.enum(["all", "web", "worker"]).default("all"),
+  DATABASE_CONNECTION_LIMIT: z.coerce.number().int().positive().max(100).default(10),
   PORT: z.coerce.number().int().positive().default(3000),
   APP_PUBLIC_BASE_URL: z.string().url().default("http://localhost:3000"),
   LOG_LEVEL: z.enum(["fatal", "error", "warn", "info", "debug", "trace", "silent"]).default("info"),
@@ -65,6 +67,7 @@ const EnvSchema = z.object({
   WEBHOOK_SYNC_RETRY_ATTEMPTS: z.coerce.number().int().nonnegative().max(5).default(2),
   WEBHOOK_SYNC_RETRY_BASE_DELAY_MS: z.coerce.number().int().positive().default(300),
   WEBHOOK_DELIVERY_IN_PROGRESS_LEASE_MS: z.coerce.number().int().positive().default(300000),
+  WEBHOOK_PROCESSING_CONCURRENCY: z.coerce.number().int().positive().max(50).default(5),
   WEBHOOK_DELIVERY_RETENTION_DAYS: z.coerce.number().int().positive().default(30),
   WEBHOOK_ALERT_FAILED_24H_HIGH: z.coerce.number().int().nonnegative().default(20),
   WEBHOOK_ALERT_IN_PROGRESS_HIGH: z.coerce.number().int().nonnegative().default(10),

@@ -1,6 +1,6 @@
 ---
 name: Feature Request
-about: Reqeust new feature or improvements.
+about: Request new features or improvements.
 title: "[feature] <short summary>"
 labels: ["feature"]
 type: Feature

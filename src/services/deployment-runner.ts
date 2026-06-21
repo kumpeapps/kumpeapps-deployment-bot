@@ -880,7 +880,8 @@ export async function executeDeployment(input: ExecuteDeploymentInput): Promise<
           sshUser: appConfig.VM_SSH_USER,
           sshKeyPath: appConfig.VM_SSH_KEY_PATH,
           sshPort: input.config.ssh_port ?? appConfig.VM_SSH_PORT,
-          remoteBaseDir: appConfig.VM_DEPLOY_BASE_DIR
+          remoteBaseDir: appConfig.VM_DEPLOY_BASE_DIR,
+          postDeployHook: input.config.post_deploy_hook
         });
       },
       (stdout) => stdout

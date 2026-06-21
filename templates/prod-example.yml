@@ -89,3 +89,10 @@ deploy_rules:
 #     branches:
 #       include:
 #         - main
+
+# Optional: Shell command run on the VM after a successful docker compose up -d.
+# Useful when the VM also runs a Nebula VPN client in a separate docker-compose — Docker's
+# iptables manipulation during container recreation can disrupt the host-level Nebula tunnel.
+# Restarting Nebula here restores VPN connectivity before the next deployment step begins.
+# Example:
+# post_deploy_hook: "docker compose -f /opt/nebula/docker-compose.yml restart nebula_client"

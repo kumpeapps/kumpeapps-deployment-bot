@@ -21,6 +21,8 @@ export type VmDeployInput = {
   sshKeyPath: string;
   sshPort: number;
   remoteBaseDir: string;
+  /** Shell command to run on the VM after a successful docker compose up -d (e.g. restart a separate Nebula service). */
+  postDeployHook?: string;
 };
 
 export type CaddyDeployInput = {
@@ -180,6 +182,24 @@ async function copyToRemote(input: RemoteCommandOptions, localPath: string, remo
   await runCommand("scp", [...commonScpArgs({ sshKeyPath: input.sshKeyPath, sshPort: input.sshPort }), localPath, `${input.sshUser}@${input.host}:${remotePath}`]);
 }
 
+/**
+ * Build the shell lines that run an operator-configured post-deploy hook.
+ * Runs only when the main compose step exits 0; hook exit code is logged but
+ * does not override the deployment result.
+ */
+function buildPostDeployHookLines(remoteLogFile: string, postDeployHook?: string): string[] {
+  if (!postDeployHook) return [];
+
+  return [
+    `if [ "$PIPE_EXIT" -eq 0 ]; then`,
+    `  echo "--- Running post-deploy hook ---" | tee -a ${shellQuote(remoteLogFile)}`,
+    `  { ${postDeployHook}; } 2>&1 | tee -a ${shellQuote(remoteLogFile)}`,
+    `  HOOK_EXIT=$?`,
+    `  if [ "$HOOK_EXIT" -ne 0 ]; then echo "Post-deploy hook exited $HOOK_EXIT" | tee -a ${shellQuote(remoteLogFile)}; fi`,
+    `fi`,
+  ];
+}
+
 export async function deployComposeToVm(input: VmDeployInput): Promise<string> {
   if (input.dryRun) {
     return "(dry run — no SSH commands executed)";
@@ -271,22 +291,40 @@ export async function deployComposeToVm(input: VmDeployInput): Promise<string> {
 
     const dockerConfigPrefix = hasRegistryLogins ? `DOCKER_CONFIG=${shellQuote(`${remoteDir}/.docker`)} ` : "";
 
-    // Build a deploy script that runs docker compose pull + restart inside a screen session.
+    // Build a deploy script that runs docker compose pull + up -d inside a screen session.
     // Running inside screen means the docker commands survive SSH disconnects; we then poll
     // via a separate SSH connection until the screen session finishes.
-    const sessionName = "kumpeapps-deploy";
-    const remoteLogFile = `${remoteDir}/.deploy.log`;
-    const remoteExitFile = `${remoteDir}/.deploy.exit`;
-    const remoteScriptFile = `${remoteDir}/.deploy.sh`;
+    // Use a timestamp-suffixed session name so concurrent deployments on the same VM
+    // don't collide with each other or accidentally terminate each other's sessions.
+    const sessionName = `kumpeapps-deploy-${Date.now()}`;
+    const remoteLogFile = `${remoteDir}/.deploy-${sessionName}.log`;
+    const remoteExitFile = `${remoteDir}/.deploy-${sessionName}.exit`;
+    const remoteScriptFile = `${remoteDir}/.deploy-${sessionName}.sh`;
     const scriptLocalPath = join(workDir, "deploy.sh");
+
+    const postDeployHookLines = buildPostDeployHookLines(remoteLogFile, input.postDeployHook);
 
     const deployScript = [
       "#!/bin/bash",
       "set -o pipefail",
       `cd ${shellQuote(remoteDir)}`,
       `rm -f ${shellQuote(remoteExitFile)} ${shellQuote(remoteLogFile)}`,
-      `{ ${dockerConfigPrefix}docker compose pull && ${dockerConfigPrefix}docker compose restart; } 2>&1 | tee ${shellQuote(remoteLogFile)}`,
-      `PIPE_EXIT=\${PIPESTATUS[0]}`,
+      // Exclude nebula_client from all compose operations to avoid disrupting the VPN tunnel.
+      // --no-deps is also required: without it, `docker compose up -d` follows depends_on and
+      // may recreate nebula_client if the freshly SCP'd .env or docker-compose.yml caused a
+      // config diff, even when nebula_client is not in the explicit service list.
+      `APP_SERVICES=$(${dockerConfigPrefix}docker compose config --services 2>/dev/null | grep -v '^nebula_client$' | tr '\\n' ' ' | xargs)`,
+      `if [ -n "$APP_SERVICES" ]; then`,
+      `  { ${dockerConfigPrefix}docker compose pull $APP_SERVICES && ${dockerConfigPrefix}docker compose up -d --no-deps $APP_SERVICES; } 2>&1 | tee ${shellQuote(remoteLogFile)}`,
+      `  PIPE_EXIT=\${PIPESTATUS[0]}`,
+      `else`,
+      `  { ${dockerConfigPrefix}docker compose pull && ${dockerConfigPrefix}docker compose up -d --no-deps; } 2>&1 | tee ${shellQuote(remoteLogFile)}`,
+      `  PIPE_EXIT=\${PIPESTATUS[0]}`,
+      `fi`,
+      `if [ "$PIPE_EXIT" -eq 0 ]; then`,
+      `  docker image prune -f 2>&1 | tee -a ${shellQuote(remoteLogFile)}`,
+      `fi`,
+      ...postDeployHookLines,
       `echo $PIPE_EXIT > ${shellQuote(remoteExitFile)}`,
       `exit $PIPE_EXIT`,
     ].join("\n");
@@ -344,9 +382,9 @@ export async function deployComposeToVm(input: VmDeployInput): Promise<string> {
     );
 
     // For new deployments, enable and start the systemctl service so it is registered for
-    // auto-restart and survives reboots. For existing deployments, `docker compose restart`
-    // above has already restarted the containers; running `systemctl restart` again would
-    // cause an unnecessary second outage window.
+    // auto-restart and survives reboots. For existing deployments, `docker compose up -d`
+    // above has already updated and started the containers; running `systemctl restart`
+    // again would cause an unnecessary second outage window.
     if (isNewDeployment) {
       const { appConfig } = await import("../config.js");
       const serviceName = appConfig.DEPLOYMENT_SERVICE_NAME;
@@ -371,7 +409,7 @@ export async function deployComposeToVm(input: VmDeployInput): Promise<string> {
       }
     }
 
-    return stdout.trim() || "docker compose restart completed";
+    return stdout.trim() || "docker compose up completed";
   } finally {
     await rm(workDir, { recursive: true, force: true });
   }

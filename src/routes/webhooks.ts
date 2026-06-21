@@ -21,6 +21,7 @@ import { processApprovalComment } from "../services/vm-approval.js";
 import { removeCaddyConfig } from "../services/ssh-deployer.js";
 import { getGitHubToken, getInstallationTokenById } from "../services/github-app-auth.js";
 import { deleteVirtualizorVm } from "../services/virtualizor.js";
+import { enqueueWebhookProcessing, initWebhookProcessingQueue } from "../services/webhook-processing-queue.js";
 
 // Module-level webhook processor for backfill support
 let webhookProcessor: ((input: { id: string; name: string; payload: any }) => Promise<void>) | null = null;
@@ -94,6 +95,7 @@ export async function registerWebhookRoutes(
   
   // Store webhook processor for backfill support
   webhookProcessor = receiveWebhook;
+  initWebhookProcessingQueue(app.log);
 
   webhooks.on("push", async ({ payload }: { payload: any }) => {
     const fullName = payload.repository.full_name;
@@ -419,7 +421,8 @@ export async function registerWebhookRoutes(
 
     // Process collaborator additions asynchronously to avoid blocking webhook response
     // This prevents database connection timeouts when there are many repositories
-    setImmediate(async () => {
+    setImmediate(() => {
+      void (async () => {
       try {
         const installationToken = await getInstallationTokenById(BigInt(payload.installation.id));
 
@@ -461,6 +464,12 @@ export async function registerWebhookRoutes(
           "Critical error in collaborator addition background task"
         );
       }
+      })().catch((error: unknown) => {
+        app.log.error(
+          { installationId: payload.installation.id, error },
+          "Unhandled error in installation.created collaborator background task"
+        );
+      });
     });
   });
 
@@ -523,7 +532,8 @@ export async function registerWebhookRoutes(
 
     // Process collaborator additions asynchronously to avoid blocking webhook response
     // This prevents database connection timeouts when there are many repositories
-    setImmediate(async () => {
+    setImmediate(() => {
+      void (async () => {
       try {
         const installationToken = await getInstallationTokenById(BigInt(payload.installation.id));
 
@@ -565,6 +575,12 @@ export async function registerWebhookRoutes(
           "Critical error in collaborator addition background task"
         );
       }
+      })().catch((error: unknown) => {
+        app.log.error(
+          { installationId: payload.installation.id, error },
+          "Unhandled error in installation_repositories.added collaborator background task"
+        );
+      });
     });
   });
 
@@ -1969,47 +1985,12 @@ Reply to this issue with a command to get started!`;
       });
     }
 
-    try {
-      await receiveWebhook({
-        id: String(deliveryId),
-        name: String(eventName),
-        payload: payloadObject
-      });
-
-      await prisma.githubWebhookDelivery.update({
-        where: { deliveryId: String(deliveryId) },
-        data: {
-          processStatus: "processed",
-          processedAt: new Date(),
-          errorMessage: null,
-          lastAttemptAt: new Date()
-        }
-      });
-    } catch (error) {
-      const errorMessage = error instanceof Error 
-        ? `${error.message}\n${error.stack ?? ""}` 
-        : String(error);
-      
-      await prisma.githubWebhookDelivery.update({
-        where: { deliveryId: String(deliveryId) },
-        data: {
-          processStatus: "failed",
-          errorMessage: errorMessage.slice(0, 1000), // Limit length
-          lastAttemptAt: new Date()
-        }
-      });
-
-      app.log.error(
-        { 
-          deliveryId: String(deliveryId), 
-          eventName: String(eventName),
-          errorMessage,
-          errorType: error?.constructor?.name ?? typeof error
-        }, 
-        "Webhook processing failed"
-      );
-      return reply.code(500).send({ error: "Webhook processing failed" });
-    }
+    enqueueWebhookProcessing({
+      deliveryId: String(deliveryId),
+      eventName: String(eventName),
+      payload: payloadObject,
+      process: receiveWebhook
+    });
 
     return reply.code(202).send({ accepted: true });
   });
