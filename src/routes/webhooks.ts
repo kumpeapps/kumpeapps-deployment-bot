@@ -90,7 +90,7 @@ export async function registerWebhookRoutes(
   const receiveWebhook = webhooks.receive.bind(webhooks) as (input: {
     id: string;
     name: string;
-    payload: string;
+    payload: unknown;
   }) => Promise<void>;
   
   // Store webhook processor for backfill support
