@@ -33,16 +33,47 @@ import {
   refreshAdminRoleBindingsCache
 } from "./services/admin-auth.js";
 import { shouldRunBackgroundWorkers, shouldRunWebServer } from "./services/process-role.js";
+import { isPrismaConnectionPoolError } from "./services/db-errors.js";
 
 const app = Fastify({
   disableRequestLogging: true,
   trustProxy: true, // Trust X-Forwarded-* headers from reverse proxy
   connectionTimeout: 30_000,
   keepAliveTimeout: 72_000,
+  requestTimeout: 120_000,
   logger: {
     level: appConfig.LOG_LEVEL,
     transport: appConfig.NODE_ENV === "development" ? { target: "pino-pretty" } : undefined
   }
+});
+
+app.setErrorHandler((error, request, reply) => {
+  if (isPrismaConnectionPoolError(error)) {
+    request.log.warn(
+      { err: error, method: request.method, path: request.url },
+      "Database connection pool saturated"
+    );
+    return reply
+      .code(503)
+      .header("Retry-After", "5")
+      .send({
+        error: "Service Temporarily Unavailable",
+        message: "Database is busy; retry shortly"
+      });
+  }
+
+  request.log.error(
+    { err: error, method: request.method, path: request.url },
+    "Unhandled route error"
+  );
+
+  const err = error as { statusCode?: number; message?: string };
+  const statusCode = typeof err.statusCode === "number" ? err.statusCode : 500;
+  const message = typeof err.message === "string" ? err.message : "Internal Server Error";
+
+  return reply.code(statusCode).send({
+    error: statusCode >= 500 ? "Internal Server Error" : message
+  });
 });
 
 if (appConfig.HTTP_ACCESS_LOG_ENABLED) {

@@ -107,16 +107,33 @@ export async function registerRepositoryManagementRoutes(
       });
     }
 
-    // Check if each repository is initialized (has apiToken)
-    const repositoriesWithStatus = await Promise.all(filteredRepositories.map(async (repo: any) => {
+    // Batch config/secret counts to avoid N+1 connection pool exhaustion.
+    const repoIds = filteredRepositories.map((repo: { id: number }) => repo.id);
+    const [configCounts, secretCounts] = repoIds.length > 0
+      ? await Promise.all([
+          prisma.deploymentConfig.groupBy({
+            by: ["repositoryId"],
+            where: { repositoryId: { in: repoIds } },
+            _count: { _all: true }
+          }),
+          prisma.repositorySecret.groupBy({
+            by: ["repositoryId"],
+            where: { repositoryId: { in: repoIds } },
+            _count: { _all: true }
+          })
+        ])
+      : [[], []];
+
+    const configCountByRepo = new Map(
+      configCounts.map((row) => [row.repositoryId, row._count._all])
+    );
+    const secretCountByRepo = new Map(
+      secretCounts.map((row) => [row.repositoryId, row._count._all])
+    );
+
+    const repositoriesWithStatus = filteredRepositories.map((repo: any) => {
       const isInitialized = !!(repo as any).apiToken;
-      
-      // Count configs and secrets separately
-      const [configCount, secretCount] = await Promise.all([
-        prisma.deploymentConfig.count({ where: { repositoryId: repo.id } }),
-        prisma.repositorySecret.count({ where: { repositoryId: repo.id } })
-      ]);
-      
+
       return {
         id: repo.id,
         owner: repo.owner,
@@ -125,11 +142,11 @@ export async function registerRepositoryManagementRoutes(
         active: repo.active,
         installationId: repo.installationId ? String(repo.installationId) : null,
         isInitialized,
-        configCount,
-        secretCount,
+        configCount: configCountByRepo.get(repo.id) ?? 0,
+        secretCount: secretCountByRepo.get(repo.id) ?? 0,
         createdAt: repo.createdAt
       };
-    }));
+    });
 
     return reply.send({
       repositories: repositoriesWithStatus,

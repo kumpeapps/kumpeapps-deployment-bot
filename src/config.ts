@@ -31,7 +31,7 @@ const EnvSchema = z.object({
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
   DEV: envBoolean().default(false),
   BOT_PROCESS_ROLE: z.enum(["all", "web", "worker"]).default("all"),
-  DATABASE_CONNECTION_LIMIT: z.coerce.number().int().positive().max(100).default(10),
+  DATABASE_CONNECTION_LIMIT: z.coerce.number().int().positive().max(100).default(20),
   PORT: z.coerce.number().int().positive().default(3000),
   APP_PUBLIC_BASE_URL: z.string().url().default("http://localhost:3000"),
   LOG_LEVEL: z.enum(["fatal", "error", "warn", "info", "debug", "trace", "silent"]).default("info"),
