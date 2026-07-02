@@ -40,6 +40,8 @@ export function generateSyncSecretsWorkflow(managedNebulaEnabled: boolean): stri
 #
 # Behavior:
 # - ALL secrets passed in the env section are synced to the bot
+# - Optional: set OP_SERVICE_ACCOUNT_TOKEN and OP_ENVIRONMENT_ID to load every
+#   variable from a 1Password Environment automatically (no per-secret list needed)
 # - You don't need to maintain a list of which secrets each config needs
 # - The bot will use the appropriate secrets based on each deployment config's env_mappings
 #
@@ -66,7 +68,11 @@ jobs:
           # Bot token (auto-created when GitHub App is installed)
           KUMPEAPPS_DEPLOY_BOT_TOKEN: \${{ secrets.KUMPEAPPS_DEPLOY_BOT_TOKEN }}
           
-          # All your application secrets - just pass them all here.
+          # Optional: load all variables from a 1Password Environment
+          # OP_SERVICE_ACCOUNT_TOKEN: \${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
+          # OP_ENVIRONMENT_ID: \${{ secrets.OP_ENVIRONMENT_ID }}
+          
+          # All your application secrets - just pass them here.
           # The action syncs everything you pass, and each deployment config
           # will use only the secrets it needs via its env_mappings section.
           
