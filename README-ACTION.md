@@ -68,14 +68,24 @@ Go to Actions → Sync Secrets → Run workflow
 
 **Why do I need to list secrets in the workflow?**
 
-<<<<<<< HEAD
 GitHub Actions security prevents dynamic secret access (e.g., `${{ secrets[varName] }}`). The action syncs everything you pass:
-- 📤 Syncs ALL secrets passed as environment variables
+- 📤 Syncs ALL secrets passed as environment variables (or loaded from 1Password)
 - 🎯 Each deployment config uses what it needs via `env_mappings`
 - 🔄 One workflow serves all environments
-=======
-GitHub Actions security prevents dynamic secret access (e.g., `${{ secrets[varName] }}`). The action syncs whatever secrets you explicitly pass in `env`.
->>>>>>> 33daf68 ([bug/#16] Fixed Sync Secrets logic)
+
+### Optional: 1Password Environment
+
+When both `OP_SERVICE_ACCOUNT_TOKEN` and `OP_ENVIRONMENT_ID` are set in the step `env`, the action installs the 1Password CLI (latest-beta), runs `op environment read`, and syncs every variable from that Environment. If either value is missing, 1Password load is skipped and sync continues with any other env vars you passed.
+
+```yaml
+- uses: kumpeapps/kumpeapps-deployment-bot@v1
+  env:
+    KUMPEAPPS_DEPLOY_BOT_TOKEN: ${{ secrets.KUMPEAPPS_DEPLOY_BOT_TOKEN }}
+    OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
+    OP_ENVIRONMENT_ID: ${{ secrets.OP_ENVIRONMENT_ID }}
+```
+
+Requires 1Password CLI 2.33.0-beta.02+ (installed automatically when enabled).
 
 ## Configuration
 
