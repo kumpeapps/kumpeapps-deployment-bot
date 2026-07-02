@@ -1,5 +1,5 @@
 name: 'KumpeApps Deployment Bot - Sync Secrets'
-description: 'Automatically sync repository secrets to the deployment bot'
+description: 'Automatically sync repository secrets to the deployment bot (optionally loads all variables from a 1Password Environment)'
 author: 'KumpeApps'
 branding:
   icon: 'upload-cloud'
@@ -18,6 +18,73 @@ inputs:
 runs:
   using: 'composite'
   steps:
+    - name: Skip 1Password Environment load
+      if: ${{ env.OP_SERVICE_ACCOUNT_TOKEN == '' || env.OP_ENVIRONMENT_ID == '' }}
+      shell: bash
+      run: |
+        echo "ℹ️ Skipping 1Password sync (set OP_SERVICE_ACCOUNT_TOKEN and OP_ENVIRONMENT_ID in the step env to enable)"
+
+    - name: Install 1Password CLI
+      if: ${{ env.OP_SERVICE_ACCOUNT_TOKEN != '' && env.OP_ENVIRONMENT_ID != '' }}
+      uses: 1password/install-cli-action@v4
+      with:
+        version: latest-beta
+
+    - name: Load all variables from 1Password Environment
+      if: ${{ env.OP_SERVICE_ACCOUNT_TOKEN != '' && env.OP_ENVIRONMENT_ID != '' }}
+      shell: bash
+      env:
+        OP_SERVICE_ACCOUNT_TOKEN: ${{ env.OP_SERVICE_ACCOUNT_TOKEN }}
+        OP_ENVIRONMENT_ID: ${{ env.OP_ENVIRONMENT_ID }}
+      run: |
+        set -euo pipefail
+
+        mask_value() {
+          local value="$1"
+          while IFS= read -r line || [ -n "$line" ]; do
+            if [ -n "$line" ]; then
+              echo "::add-mask::${line}"
+            fi
+          done <<< "$value"
+        }
+
+        write_env_var() {
+          local name="$1"
+          local value="$2"
+          mask_value "$value"
+          {
+            echo "${name}<<EOF"
+            printf '%s' "$value"
+            echo
+            echo "EOF"
+          } >> "$GITHUB_ENV"
+        }
+
+        op_stderr="$(mktemp)"
+        if ! env_output="$(op environment read "$OP_ENVIRONMENT_ID" 2>"$op_stderr")"; then
+          echo "::error::Failed to read 1Password environment: $(tr -d '\n' < "$op_stderr")"
+          rm -f "$op_stderr"
+          exit 1
+        fi
+        rm -f "$op_stderr"
+
+        loaded_count=0
+        while IFS= read -r line || [ -n "$line" ]; do
+          [ -z "$line" ] && continue
+          name="${line%%=*}"
+          value="${line#*=}"
+          value="$(printf '%s' "$value" | tr -d '\r\n')"
+          if [ -z "$name" ]; then
+            continue
+          fi
+          write_env_var "$name" "$value"
+          loaded_count=$((loaded_count + 1))
+          echo "🔐 Loaded 1Password variable: ${name}"
+        done <<< "$env_output"
+        unset env_output
+
+        echo "✅ Loaded ${loaded_count} variable(s) from 1Password Environment"
+
     - name: Sync all secrets to deployment bot
       shell: bash
       env:
@@ -43,10 +110,10 @@ runs:
         echo ""
         
         # Get all environment variables, excluding system/GitHub Actions variables
-        SECRET_NAMES=$(env | grep -E '^[A-Z][A-Z0-9_]*=' | cut -d= -f1 | grep -v -E '^(GITHUB_|RUNNER_|CI|PATH|HOME|USER|SHELL|PWD|OLDPWD|LANG|LC_|TERM|SHLVL|_|BOT_URL|BOT_TOKEN|ACTIONS_|AGENT_|ANDROID_|AZURE_|CHROME|CONDA|DEPLOYMENT_|DOTNET_|GOROOT|GRADLE_|GRAALVM_|HOMEBREW_|ImageOS|ImageVersion|INVOCATION_ID|JAVA_|JOURNAL_STREAM|LEIN_|NVM_|PERFLOG_|POWERSHELL_|SELENIUM_|SGX_|STATS_|SWIFT_|VCPKG_|INPUT_)')
+        SECRET_NAMES=$(env | grep -E '^[A-Z][A-Z0-9_]*=' | cut -d= -f1 | grep -v -E '^(GITHUB_|RUNNER_|CI|PATH|HOME|USER|SHELL|PWD|OLDPWD|LANG|LC_|TERM|SHLVL|_|BOT_URL|BOT_TOKEN|OP_SERVICE_ACCOUNT_TOKEN|OP_ENVIRONMENT_ID|KUMPEAPPS_DEPLOY_BOT_TOKEN|DEPLOYMENT_BOT_TOKEN|ACTIONS_|AGENT_|ANDROID_|AZURE_|CHROME|CONDA|DEPLOYMENT_|DOTNET_|GOROOT|GRADLE_|GRAALVM_|HOMEBREW_|ImageOS|ImageVersion|INVOCATION_ID|JAVA_|JOURNAL_STREAM|LEIN_|NVM_|PERFLOG_|POWERSHELL_|SELENIUM_|SGX_|STATS_|SWIFT_|VCPKG_|INPUT_)')
         if [ -z "$SECRET_NAMES" ]; then
           echo "::warning::No secrets found in environment variables to sync"
-          echo "::warning::Make sure to pass your secrets in the env section of the action"
+          echo "::warning::Configure 1Password Environment secrets and/or pass secrets via the step env"
           exit 0
         fi
         
