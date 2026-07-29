@@ -157,6 +157,27 @@ Primary incident paths covered:
 3. Record timeline, root cause, and follow-up tasks.
 4. Link incident notes in the next release notes under known risks/resolved issues.
 
+## Docker Hub / GHCR pull-through caches
+
+Private-LAN caches on the bot host cut Hub 429s and WAN bandwidth. VMs reach them without Nebula.
+
+**Important:** Docker Hub pull-through does **not** work with direct pulls like `BOT:5000/library/busybox` (returns `not found`). Hub must be configured as daemon `registry-mirrors`. GHCR uses compose image rewrite to `BOT:5001/...`.
+
+1. Set bot `.env`:
+   - `DOCKERHUB_USERNAME` / `DOCKERHUB_TOKEN` (cache upstream + default VM auth)
+   - `GHCR_USERNAME` / `GHCR_TOKEN` (`read:packages`)
+   - `DOCKER_HUB_MIRROR_URL=http://<bot-private-ip>:5000`
+   - `DOCKER_GHCR_MIRROR_URL=http://<bot-private-ip>:5001`
+   - `DOCKER_REGISTRY_CACHE_TTL=24h`
+2. Start caches on the bot host (`docker-hub-cache` / `docker-ghcr-cache`). Ensure Hub/GHCR tokens are set on that host so the proxies can pull upstream.
+3. Firewall: allow VM subnet → bot `:5000` and `:5001` only.
+4. **New VMs:** Virtualizor recipe [`scripts/virtualizor-recipes/configure-docker-registry-caches.sh`](../scripts/virtualizor-recipes/configure-docker-registry-caches.sh) (edit `BOT_CACHE_IP` at top; no args). Sets:
+   - `registry-mirrors: ["http://BOT:5000"]` (Hub)
+   - `insecure-registries: ["BOT:5000", "BOT:5001"]` (HTTP)
+5. **Existing VMs:** run that recipe once as root, or leave as-is — bot falls back to direct Hub/GHCR pulls (no deploy failure).
+6. On deploy: Hub images stay as `busybox:1.36` (daemon mirrors them). `ghcr.io/...` is rewritten to `BOT:5001/...` when insecure-registries allows it.
+7. Per-app `registry_auth` overrides bot defaults; GHCR override skips rewrite for that deploy.
+
 ## Game-day Simulation Checklist
 
 1. [x] Simulate queue depth breach and verify runbook path execution.

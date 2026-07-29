@@ -2,6 +2,12 @@ import { prisma } from "../db.js";
 import { appConfig } from "../config.js";
 import { getGitHubToken } from "./github-app-auth.js";
 import { triggerQueuePoll } from "./deployment-queue.js";
+import {
+  resolvePreferredIssueTypeName,
+  type GitHubIssueType
+} from "./github-issue-types.js";
+
+export { resolvePreferredIssueTypeName } from "./github-issue-types.js";
 
 type CreateApprovalInput = {
   repositoryFullName: string;
@@ -19,6 +25,38 @@ type CreateApprovalInput = {
 };
 
 type ApprovalStatus = "pending" | "approved" | "rejected" | "cancelled";
+
+async function fetchRepositoryIssueTypes(input: {
+  owner: string;
+  name: string;
+  token: string;
+}): Promise<GitHubIssueType[]> {
+  try {
+    const response = await fetch(
+      `https://api.github.com/repos/${encodeURIComponent(input.owner)}/${encodeURIComponent(input.name)}/issue-types`,
+      {
+        headers: {
+          Authorization: `Bearer ${input.token}`,
+          Accept: "application/vnd.github+json",
+          "X-GitHub-Api-Version": "2022-11-28",
+          "User-Agent": "kumpeapps-deployment-bot"
+        },
+        signal: AbortSignal.timeout(15000)
+      }
+    );
+    if (!response.ok) {
+      console.warn(
+        `[VM Approval] Could not list issue types for ${input.owner}/${input.name}: HTTP ${response.status}`
+      );
+      return [];
+    }
+    const types = (await response.json()) as GitHubIssueType[];
+    return Array.isArray(types) ? types : [];
+  } catch (error) {
+    console.warn(`[VM Approval] Failed to list issue types:`, error);
+    return [];
+  }
+}
 
 export async function createVmApprovalRequest(input: CreateApprovalInput): Promise<number> {
   const [owner, name] = input.repositoryFullName.split('/');
@@ -85,19 +123,29 @@ A new virtual machine is requested for this repository.
 
 **Note:** Only you (@${input.assignedUsername}) can approve this request. Bot admins may also override with \`/bot approve admin-override\`. The VM will be created automatically once approved.`;
 
+  const issueTypes = await fetchRepositoryIssueTypes({ owner, name, token });
+  const issueType = resolvePreferredIssueTypeName(issueTypes, "Task");
+  if (issueType) {
+    console.log(`[VM Approval] Using issue type "${issueType}" for approval issue`);
+  } else {
+    console.log(`[VM Approval] Issue type Task not available; creating issue without type`);
+  }
 
   const issueResponse = await fetch(`https://api.github.com/repos/${owner}/${name}/issues`, {
     method: 'POST',
     headers: {
       'Authorization': `Bearer ${token}`,
       'Accept': 'application/vnd.github+json',
-      'Content-Type': 'application/json'
+      'Content-Type': 'application/json',
+      'X-GitHub-Api-Version': '2022-11-28',
+      'User-Agent': 'kumpeapps-deployment-bot'
     },
     body: JSON.stringify({
       title: `[VM Approval] ${input.environment} VM for @${input.assignedUsername}`,
       body: issueBody,
       labels: ['vm-approval', 'task'],
-      assignees: [input.assignedUsername]
+      assignees: [input.assignedUsername],
+      ...(issueType ? { type: issueType } : {})
     })
   });
   

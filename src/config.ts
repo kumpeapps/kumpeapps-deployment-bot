@@ -95,7 +95,22 @@ const EnvSchema = z.object({
   VM_DEPLOY_BASE_DIR: z.string().default("/opt/kumpeapps"),
   DEPLOYMENT_SERVICE_NAME: z.string().default("kumpeapps-bot-deployment"),
   SSH_CONNECT_TIMEOUT_SECONDS: z.coerce.number().int().positive().default(15),
+  /** Seconds with no deploy progress (screen gone / log idle) before failing. */
   SSH_DOCKER_COMMAND_TIMEOUT_SECONDS: z.coerce.number().int().positive().default(600),
+  /** Absolute max wait while a live screen session may still be pulling large images. */
+  SSH_DOCKER_DEPLOY_MAX_SECONDS: z.coerce.number().int().positive().default(3600),
+  /** Private-LAN Docker Hub pull-through cache URL (e.g. http://10.x.x.x:5000). Empty disables. */
+  DOCKER_HUB_MIRROR_URL: z.string().default(""),
+  /** Private-LAN GHCR pull-through cache URL (e.g. http://10.x.x.x:5001). Empty disables rewrite. */
+  DOCKER_GHCR_MIRROR_URL: z.string().default(""),
+  /** Distribution proxy.ttl for Hub/GHCR caches (e.g. 24h). */
+  DOCKER_REGISTRY_CACHE_TTL: z.string().default("24h"),
+  /** Bot-default Docker Hub credentials (cache upstream + default VM DOCKER_CONFIG). */
+  DOCKERHUB_USERNAME: z.string().default(""),
+  DOCKERHUB_TOKEN: z.string().default(""),
+  /** Bot-default GHCR credentials (cache upstream + default VM DOCKER_CONFIG). */
+  GHCR_USERNAME: z.string().default(""),
+  GHCR_TOKEN: z.string().default(""),
   SSH_COMMAND_RETRIES: z.coerce.number().int().nonnegative().max(5).default(2),
   SSH_ALERT_FINAL_FAILURES_1H_HIGH: z.coerce.number().int().nonnegative().default(10),
   SSH_ALERT_TIMEOUT_FAILURES_1H_HIGH: z.coerce.number().int().nonnegative().default(3),

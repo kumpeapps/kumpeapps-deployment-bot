@@ -9,7 +9,7 @@
     "start": "node dist/index.js",
     "smoke:test": "bash scripts/smoke-test.sh",
     "release:notes": "bash scripts/generate-release-notes.sh",
-    "test": "node --import tsx/esm --test-reporter spec --test src/schemas/deployment-config.test.ts src/services/deploy-rules.test.ts src/services/secret-crypto-core.test.ts src/services/secret-health.test.ts src/services/ssh-health.test.ts src/services/webhook-security-health.test.ts src/services/virtualizor-health.test.ts src/services/admin-api-security-health.test.ts src/services/admin-auth.test.ts src/services/admin-auth.routes.test.ts src/services/rate-limit-health.test.ts src/services/deployment-compensation-health.test.ts src/services/github-status.test.ts src/services/rate-limit.test.ts",
+    "test": "node --import tsx/esm --test-reporter spec --test src/schemas/deployment-config.test.ts src/services/deploy-rules.test.ts src/services/secret-crypto-core.test.ts src/services/secret-health.test.ts src/services/ssh-health.test.ts src/services/ssh-deployer.test.ts src/services/webhook-security-health.test.ts src/services/virtualizor-health.test.ts src/services/admin-api-security-health.test.ts src/services/admin-auth.test.ts src/services/admin-auth.routes.test.ts src/services/rate-limit-health.test.ts src/services/deployment-compensation-health.test.ts src/services/github-status.test.ts src/services/rate-limit.test.ts",
     "test:docker": "docker compose --profile test run --rm bot-test",
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev",
