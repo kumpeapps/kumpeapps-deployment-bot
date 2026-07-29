@@ -204,6 +204,7 @@ Notes:
 - Use a PAT/token for `password_env` when your registry requires tokens.
 - For GHCR, use a GitHub username + token pair with package read access.
 - The bot generates a VM-local Docker auth config and uses it for `docker compose pull` and `docker compose up`.
+- Operators can set bot-wide `DOCKERHUB_*` / `GHCR_*` defaults (and optional LAN pull-through caches). Per-app `registry_auth` overrides those defaults for that deploy only. See the operator runbook for mirror setup.
 
 **Automatic Managed Nebula Client Injection**
 

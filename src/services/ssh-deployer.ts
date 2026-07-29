@@ -5,6 +5,21 @@ import { promisify } from "node:util";
 import { execFile } from "node:child_process";
 import { appConfig } from "../config.js";
 import { recordSshCommandAttempt, recordSshCommandFinalFailure, recordSshCommandSuccess } from "./ssh-health.js";
+import {
+  buildScreenStartCommand,
+  buildVmDeployPollScript,
+  buildVmDeployScript
+} from "./ssh-deploy-scripts.js";
+import { buildDockerConfigContent } from "./docker-registry-auth.js";
+import { insecureRegistryHostsFromDockerInfo, registryMirrorsFromDockerInfo } from "./docker-registry-mirror.js";
+
+export {
+  buildEnsureNebulaClientLines,
+  buildScreenStartCommand,
+  buildVmDeployPollScript,
+  buildVmDeployScript
+} from "./ssh-deploy-scripts.js";
+export type { VmDeployPollScriptInput, VmDeployScriptInput } from "./ssh-deploy-scripts.js";
 
 export type VmDeployInput = {
   vmHostname: string;
@@ -69,23 +84,6 @@ function envFileContent(envValues: Record<string, string>): string {
   return Object.entries(envValues)
     .map(([key, value]) => `${key}=${JSON.stringify(value)}`)
     .join("\n");
-}
-
-function dockerConfigContent(registryLogins: Array<{ registry: string; username: string; password: string }>): string {
-  const auths: Record<string, { auth: string }> = {};
-
-  for (const login of registryLogins) {
-    const key = login.registry.trim();
-    if (!key) {
-      continue;
-    }
-
-    auths[key] = {
-      auth: Buffer.from(`${login.username}:${login.password}`, "utf8").toString("base64")
-    };
-  }
-
-  return JSON.stringify({ auths });
 }
 
 function commonSshArgs(input: { sshKeyPath: string; sshPort: number }): string[] {
@@ -183,21 +181,50 @@ async function copyToRemote(input: RemoteCommandOptions, localPath: string, remo
 }
 
 /**
- * Build the shell lines that run an operator-configured post-deploy hook.
- * Runs only when the main compose step exits 0; hook exit code is logged but
- * does not override the deployment result.
+ * Probe docker RegistryConfig via `docker info` (no sudo / daemon.json access required).
+ * Returns empty sets on failure so callers skip mirror usage (safe fallback).
  */
-function buildPostDeployHookLines(remoteLogFile: string, postDeployHook?: string): string[] {
-  if (!postDeployHook) return [];
+export async function probeVmDockerRegistryConfig(input: {
+  vmIp: string;
+  sshUser: string;
+  sshKeyPath: string;
+  sshPort: number;
+  dryRun?: boolean;
+}): Promise<{ insecureHosts: Set<string>; registryMirrors: string[] }> {
+  if (input.dryRun) {
+    return { insecureHosts: new Set(), registryMirrors: [] };
+  }
 
-  return [
-    `if [ "$PIPE_EXIT" -eq 0 ]; then`,
-    `  echo "--- Running post-deploy hook ---" | tee -a ${shellQuote(remoteLogFile)}`,
-    `  { ${postDeployHook}; } 2>&1 | tee -a ${shellQuote(remoteLogFile)}`,
-    `  HOOK_EXIT=$?`,
-    `  if [ "$HOOK_EXIT" -ne 0 ]; then echo "Post-deploy hook exited $HOOK_EXIT" | tee -a ${shellQuote(remoteLogFile)}; fi`,
-    `fi`,
-  ];
+  try {
+    const { stdout } = await runRemoteSsh(
+      {
+        sshUser: input.sshUser,
+        sshKeyPath: input.sshKeyPath,
+        sshPort: input.sshPort,
+        host: input.vmIp
+      },
+      "docker info --format '{{json .RegistryConfig}}' 2>/dev/null || echo '{}'"
+    );
+    const raw = stdout.trim() || "{}";
+    return {
+      insecureHosts: insecureRegistryHostsFromDockerInfo(raw),
+      registryMirrors: registryMirrorsFromDockerInfo(raw)
+    };
+  } catch {
+    return { insecureHosts: new Set(), registryMirrors: [] };
+  }
+}
+
+/** @deprecated Use probeVmDockerRegistryConfig */
+export async function probeVmInsecureRegistryHosts(input: {
+  vmIp: string;
+  sshUser: string;
+  sshKeyPath: string;
+  sshPort: number;
+  dryRun?: boolean;
+}): Promise<Set<string>> {
+  const { insecureHosts } = await probeVmDockerRegistryConfig(input);
+  return insecureHosts;
 }
 
 export async function deployComposeToVm(input: VmDeployInput): Promise<string> {
@@ -216,7 +243,7 @@ export async function deployComposeToVm(input: VmDeployInput): Promise<string> {
     await writeFile(composePath, input.composeConfig, "utf8");
     await writeFile(envPath, envFileContent(input.envValues), "utf8");
     if (hasRegistryLogins && input.registryLogins) {
-      await writeFile(dockerConfigPath, dockerConfigContent(input.registryLogins), "utf8");
+      await writeFile(dockerConfigPath, buildDockerConfigContent(input.registryLogins), "utf8");
     }
 
     await runRemoteSsh(
@@ -289,7 +316,7 @@ export async function deployComposeToVm(input: VmDeployInput): Promise<string> {
       );
     }
 
-    const dockerConfigPrefix = hasRegistryLogins ? `DOCKER_CONFIG=${shellQuote(`${remoteDir}/.docker`)} ` : "";
+    const dockerConfigDir = hasRegistryLogins ? `${remoteDir}/.docker` : undefined;
 
     // Build a deploy script that runs docker compose pull + up -d inside a screen session.
     // Running inside screen means the docker commands survive SSH disconnects; we then poll
@@ -300,34 +327,19 @@ export async function deployComposeToVm(input: VmDeployInput): Promise<string> {
     const remoteLogFile = `${remoteDir}/.deploy-${sessionName}.log`;
     const remoteExitFile = `${remoteDir}/.deploy-${sessionName}.exit`;
     const remoteScriptFile = `${remoteDir}/.deploy-${sessionName}.sh`;
+    const remoteScreenLogFile = `${remoteDir}/.deploy-${sessionName}.screen.log`;
+    const latestScreenLogFile = `${remoteDir}/.deploy-latest.screen.log`;
     const scriptLocalPath = join(workDir, "deploy.sh");
+    const idleTimeoutSecs = appConfig.SSH_DOCKER_COMMAND_TIMEOUT_SECONDS;
+    const maxTimeoutSecs = Math.max(idleTimeoutSecs, appConfig.SSH_DOCKER_DEPLOY_MAX_SECONDS);
 
-    const postDeployHookLines = buildPostDeployHookLines(remoteLogFile, input.postDeployHook);
-
-    const deployScript = [
-      "#!/bin/bash",
-      "set -o pipefail",
-      `cd ${shellQuote(remoteDir)}`,
-      `rm -f ${shellQuote(remoteExitFile)} ${shellQuote(remoteLogFile)}`,
-      // Exclude nebula_client from all compose operations to avoid disrupting the VPN tunnel.
-      // --no-deps is also required: without it, `docker compose up -d` follows depends_on and
-      // may recreate nebula_client if the freshly SCP'd .env or docker-compose.yml caused a
-      // config diff, even when nebula_client is not in the explicit service list.
-      `APP_SERVICES=$(${dockerConfigPrefix}docker compose config --services 2>/dev/null | grep -v '^nebula_client$' | tr '\\n' ' ' | xargs)`,
-      `if [ -n "$APP_SERVICES" ]; then`,
-      `  { ${dockerConfigPrefix}docker compose pull $APP_SERVICES && ${dockerConfigPrefix}docker compose up -d --no-deps $APP_SERVICES; } 2>&1 | tee ${shellQuote(remoteLogFile)}`,
-      `  PIPE_EXIT=\${PIPESTATUS[0]}`,
-      `else`,
-      `  { ${dockerConfigPrefix}docker compose pull && ${dockerConfigPrefix}docker compose up -d --no-deps; } 2>&1 | tee ${shellQuote(remoteLogFile)}`,
-      `  PIPE_EXIT=\${PIPESTATUS[0]}`,
-      `fi`,
-      `if [ "$PIPE_EXIT" -eq 0 ]; then`,
-      `  docker image prune -f 2>&1 | tee -a ${shellQuote(remoteLogFile)}`,
-      `fi`,
-      ...postDeployHookLines,
-      `echo $PIPE_EXIT > ${shellQuote(remoteExitFile)}`,
-      `exit $PIPE_EXIT`,
-    ].join("\n");
+    const deployScript = buildVmDeployScript({
+      remoteDir,
+      remoteLogFile,
+      remoteExitFile,
+      dockerConfigDir,
+      postDeployHook: input.postDeployHook
+    });
 
     await writeFile(scriptLocalPath, deployScript, "utf8");
 
@@ -348,37 +360,35 @@ export async function deployComposeToVm(input: VmDeployInput): Promise<string> {
       `chmod +x ${shellQuote(remoteScriptFile)}`
     );
 
-    // Kill any lingering prior session then start a new detached screen session
+    // Kill any lingering prior session then start a new detached screen session (with logfile).
     await runRemoteSsh(
       { sshUser: input.sshUser, sshKeyPath: input.sshKeyPath, sshPort: input.sshPort, host: input.vmIp },
-      `screen -S ${sessionName} -X quit 2>/dev/null; screen -dmS ${sessionName} ${shellQuote(remoteScriptFile)}`
+      buildScreenStartCommand(
+        sessionName,
+        remoteScriptFile,
+        remoteExitFile,
+        remoteScreenLogFile,
+        latestScreenLogFile
+      )
     );
 
-    // Poll (via a separate SSH connection) until the exit file appears or we time out.
-    // If the polling SSH connection drops, the screen session on the VM continues running.
-    const pollTimeoutSecs = appConfig.SSH_DOCKER_COMMAND_TIMEOUT_SECONDS;
-    const pollScript = [
-      `ELAPSED=0`,
-      `while [ ! -f ${shellQuote(remoteExitFile)} ] && [ "$ELAPSED" -lt ${pollTimeoutSecs} ]; do`,
-      `  sleep 5`,
-      `  ELAPSED=$((ELAPSED + 5))`,
-      `done`,
-      `if [ -f ${shellQuote(remoteExitFile)} ]; then`,
-      `  EXIT_CODE=$(cat ${shellQuote(remoteExitFile)})`,
-      `  cat ${shellQuote(remoteLogFile)} 2>/dev/null || true`,
-      `  rm -f ${shellQuote(remoteScriptFile)} ${shellQuote(remoteLogFile)} ${shellQuote(remoteExitFile)}`,
-      `  exit "$EXIT_CODE"`,
-      `else`,
-      `  printf 'Timed out after %ds — docker compose may still be running in screen session: %s\\n' ${pollTimeoutSecs} ${sessionName}`,
-      `  cat ${shellQuote(remoteLogFile)} 2>/dev/null || true`,
-      `  exit 1`,
-      `fi`,
-    ].join("\n");
+    // Poll until the exit file appears. While the screen session is alive (slow pulls),
+    // keep waiting up to maxTimeoutSecs; only idle-timeout when progress has stopped.
+    const pollScript = buildVmDeployPollScript({
+      remoteLogFile,
+      remoteExitFile,
+      remoteScriptFile,
+      screenLogFile: remoteScreenLogFile,
+      latestScreenLogFile,
+      sessionName,
+      idleTimeoutSecs,
+      maxTimeoutSecs
+    });
 
     const { stdout } = await runRemoteSsh(
       { sshUser: input.sshUser, sshKeyPath: input.sshKeyPath, sshPort: input.sshPort, host: input.vmIp },
       pollScript,
-      (appConfig.SSH_DOCKER_COMMAND_TIMEOUT_SECONDS + 30) * 1000
+      (maxTimeoutSecs + 60) * 1000
     );
 
     // For new deployments, enable and start the systemctl service so it is registered for

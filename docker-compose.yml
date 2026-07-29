@@ -66,5 +66,43 @@ services:
       retries: 10
     restart: unless-stopped
 
+  # Docker Hub pull-through cache (VM registry-mirrors → this). Auth uses bot DOCKERHUB_* creds.
+  docker-hub-cache:
+    image: registry:2
+    container_name: kumpeapps-docker-hub-cache
+    environment:
+      REGISTRY_PROXY_REMOTEURL: https://registry-1.docker.io
+      REGISTRY_PROXY_USERNAME: ${DOCKERHUB_USERNAME:-}
+      REGISTRY_PROXY_PASSWORD: ${DOCKERHUB_TOKEN:-}
+      REGISTRY_PROXY_TTL: ${DOCKER_REGISTRY_CACHE_TTL:-24h}
+      REGISTRY_STORAGE_DELETE_ENABLED: "true"
+    ports:
+      - "5000:5000"
+    volumes:
+      - docker_hub_cache_data:/var/lib/registry
+    restart: unless-stopped
+    profiles:
+      - registry-cache
+
+  # GHCR pull-through cache (compose ghcr.io refs rewritten → this). Auth uses bot GHCR_* creds.
+  docker-ghcr-cache:
+    image: registry:2
+    container_name: kumpeapps-docker-ghcr-cache
+    environment:
+      REGISTRY_PROXY_REMOTEURL: https://ghcr.io
+      REGISTRY_PROXY_USERNAME: ${GHCR_USERNAME:-}
+      REGISTRY_PROXY_PASSWORD: ${GHCR_TOKEN:-}
+      REGISTRY_PROXY_TTL: ${DOCKER_REGISTRY_CACHE_TTL:-24h}
+      REGISTRY_STORAGE_DELETE_ENABLED: "true"
+    ports:
+      - "5001:5000"
+    volumes:
+      - docker_ghcr_cache_data:/var/lib/registry
+    restart: unless-stopped
+    profiles:
+      - registry-cache
+
 volumes:
   mariadb_data:
+  docker_hub_cache_data:
+  docker_ghcr_cache_data:

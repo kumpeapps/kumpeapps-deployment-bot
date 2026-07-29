@@ -9,7 +9,7 @@ import {
   validateDeploymentPolicy,
   validateCaddyfileDomains
 } from "../schemas/deployment-config.js";
-import { compensateComposeOnVm, deployCaddyConfig, deployComposeToVm } from "./ssh-deployer.js";
+import { compensateComposeOnVm, deployCaddyConfig, deployComposeToVm, probeVmDockerRegistryConfig } from "./ssh-deployer.js";
 import { resolveRepositoryEnvValues } from "./repository-secrets.js";
 import { ensureVirtualizorVm, resolvePlanDetails } from "./virtualizor.js";
 import { createGithubDeployment, updateGithubDeploymentStatus, updateCommitStatus, checkWorkflowsOnce, reportDeploymentError, closeDeploymentErrorIssue } from "./github-status.js";
@@ -19,6 +19,14 @@ import { getGitHubToken } from "./github-app-auth.js";
 import { syncAuthorizedAdminsToVm } from "./vm-user-management.js";
 import { fetchFileFromGitHub } from "./github-automation.js";
 import { getNebulaIpAddress } from "./nebula-provisioning.js";
+import {
+  isHubRegistryMirrorConfigured,
+  isMirrorHostAllowed,
+  mergeRegistryLogins,
+  mirrorUrlToHostPort,
+  rewriteGhcrImageRefs,
+  shouldSkipGhcrRewrite
+} from "./docker-registry-mirror.js";
 
 /**
  * Thrown when required GitHub Actions workflows are still in progress.
@@ -832,7 +840,7 @@ export async function executeDeployment(input: ExecuteDeploymentInput): Promise<
       deploymentId: deployment.id
     });
 
-    const registryLogins: ResolvedRegistryAuth[] = [];
+    const deployOverrides: ResolvedRegistryAuth[] = [];
     for (const auth of input.config.registry_auth ?? []) {
       const username = resolvedSecrets.envValues[auth.username_env];
       const password = resolvedSecrets.envValues[auth.password_env];
@@ -844,13 +852,31 @@ export async function executeDeployment(input: ExecuteDeploymentInput): Promise<
       }
 
       if (username && password) {
-        registryLogins.push({
+        deployOverrides.push({
           registry: auth.registry,
           username,
           password
         });
       }
     }
+
+    const botDefaults: ResolvedRegistryAuth[] = [];
+    if (appConfig.DOCKERHUB_USERNAME && appConfig.DOCKERHUB_TOKEN) {
+      botDefaults.push({
+        registry: "https://index.docker.io/v1/",
+        username: appConfig.DOCKERHUB_USERNAME,
+        password: appConfig.DOCKERHUB_TOKEN
+      });
+    }
+    if (appConfig.GHCR_USERNAME && appConfig.GHCR_TOKEN) {
+      botDefaults.push({
+        registry: "ghcr.io",
+        username: appConfig.GHCR_USERNAME,
+        password: appConfig.GHCR_TOKEN
+      });
+    }
+
+    const registryLogins = mergeRegistryLogins({ botDefaults, deployOverrides });
 
     console.log(`[Deployment Runner] Starting docker compose deployment to VM...`);
 
@@ -865,6 +891,59 @@ export async function executeDeployment(input: ExecuteDeploymentInput): Promise<
 
     // Inject Managed Nebula client service
     dockerComposeContent = await injectNebulaClient(dockerComposeContent);
+
+    const hubMirrorUrl = appConfig.DOCKER_HUB_MIRROR_URL.trim() || undefined;
+    const ghcrMirrorUrl = appConfig.DOCKER_GHCR_MIRROR_URL.trim() || undefined;
+
+    let insecureHosts = new Set<string>();
+    let registryMirrors: string[] = [];
+    if ((hubMirrorUrl || ghcrMirrorUrl) && !input.dryRun) {
+      const probed = await probeVmDockerRegistryConfig({
+        vmIp: vmIp!,
+        sshUser: appConfig.VM_SSH_USER,
+        sshKeyPath: appConfig.VM_SSH_KEY_PATH,
+        sshPort: input.config.ssh_port ?? appConfig.VM_SSH_PORT
+      });
+      insecureHosts = probed.insecureHosts;
+      registryMirrors = probed.registryMirrors;
+      console.log(
+        `[Deployment Runner] VM insecure registries: ${
+          insecureHosts.size ? [...insecureHosts].join(",") : "(none)"
+        }; registry-mirrors: ${registryMirrors.length ? registryMirrors.join(",") : "(none)"}`
+      );
+    }
+
+    // Hub pull-through only works via daemon registry-mirrors (recipe sets this).
+    // Do NOT rewrite Hub images to host:5000/... — direct pulls return "not found".
+    if (hubMirrorUrl) {
+      if (isHubRegistryMirrorConfigured(hubMirrorUrl, registryMirrors)) {
+        console.log(
+          `[Deployment Runner] Hub pulls will use registry-mirrors ${hubMirrorUrl} (busybox etc. unchanged in compose)`
+        );
+      } else {
+        console.log(
+          `[Deployment Runner] Hub registry-mirrors not configured on VM — pulling Docker Hub directly (fallback)`
+        );
+      }
+    }
+
+    const ghcrMirrorAllowed = Boolean(ghcrMirrorUrl && isMirrorHostAllowed(ghcrMirrorUrl, insecureHosts));
+
+    if (ghcrMirrorUrl && !shouldSkipGhcrRewrite(registryLogins) && ghcrMirrorAllowed) {
+      const rewritten = rewriteGhcrImageRefs(dockerComposeContent, mirrorUrlToHostPort(ghcrMirrorUrl));
+      dockerComposeContent = rewritten.content;
+      console.log(
+        `[Deployment Runner] Rewrote ${rewritten.rewrittenCount} ghcr.io image ref(s) to ${mirrorUrlToHostPort(ghcrMirrorUrl)}`
+      );
+    } else if (ghcrMirrorUrl && shouldSkipGhcrRewrite(registryLogins)) {
+      console.log(
+        `[Deployment Runner] Skipping GHCR mirror rewrite — deploy registry_auth overrides ghcr.io`
+      );
+    } else if (ghcrMirrorUrl && !ghcrMirrorAllowed) {
+      console.log(
+        `[Deployment Runner] Skipping GHCR mirror rewrite — ${mirrorUrlToHostPort(ghcrMirrorUrl)} not in VM insecure-registries (pulling ghcr.io directly)`
+      );
+    }
 
     await runStep(
       deployment.id,
