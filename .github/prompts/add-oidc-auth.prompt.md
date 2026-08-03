@@ -1,0 +1,1 @@
+../../.ai-agent-skills/prompts/add-oidc-auth.md

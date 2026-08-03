@@ -1,0 +1,1 @@
+../../.ai-agent-skills/prompts/dockerize-stack.md

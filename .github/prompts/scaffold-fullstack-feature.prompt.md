@@ -1,0 +1,1 @@
+../../.ai-agent-skills/prompts/scaffold-fullstack-feature.md
